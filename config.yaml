@@ -1,0 +1,304 @@
+security:
+  # 与 RongNengRAG 网关使用同一组环境变量，直连 Excel 端口也必须认证。
+  require_auth: false
+  api_keys_env: "RONGNENG_API_KEYS_JSON"
+  single_api_key_env: "RONGNENG_API_KEY"
+  single_principal_env: "RONGNENG_API_PRINCIPAL"
+
+server:
+  # 0.0.0.0 允许局域网内其他机器访问；仅本机用 127.0.0.1
+  host: "0.0.0.0"
+  port: 8090
+  storage_path: "data/workbook_imports"
+  # Optional local CJK font for server-side PDF rendering.  If empty, the
+  # service auto-detects common Noto/WQY fonts and WSL Windows fonts.  The
+  # environment variable EXCEL_REPORT_PDF_FONT_PATH takes precedence.
+  pdf_font_path: ""
+  preview_page_size: 100
+  query_row_limit: 500
+  # Import guardrails against memory exhaustion (the legacy parser OOM'd on
+  # large uploads).  Raise these if a legitimately large workbook is rejected;
+  # the import is refused with a clear error rather than the process being killed.
+  max_import_bytes: 209715200   # 200 MB, reject uploads over this
+  max_import_rows: 100000       # per-sheet logical row limit
+  max_import_columns: 512       # per-sheet column limit
+  max_import_cells: 2000000     # rectangular grid cells across all sheets
+  max_cell_chars: 32767         # Excel-compatible per-cell text ceiling
+  max_total_text_chars: 67108864 # text retained in a draft across all sheets
+  max_uncompressed_bytes: 268435456 # total OOXML ZIP expanded bytes (256 MB)
+  max_zip_ratio: 200            # per-entry compression ratio (for entries >1 MB)
+  max_zip_entries: 10000
+  max_merged_cells: 200000      # maximum expanded cells across merge ranges
+  max_xml_entry_bytes: 67108864 # reject a single XML part over 64 MB
+  max_concurrent_imports: 2     # reject excess parse jobs; do not queue unbounded work
+  sql_timeout_ms: 5000          # wall-clock ceiling for one SQLite statement
+  sql_vm_steps: 2000000         # approximate SQLite VM instruction ceiling
+  max_concurrent_sql: 4
+  max_concurrent_agent_runs: 2
+
+excel:
+  # 默认 LLM（/ask 未指定 model 时使用）
+  llm:
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-v4-flash"
+    api_key: ""
+    # 优先读环境变量 EXCEL_LLM_API_KEY 或 DEEPSEEK_API_KEY;
+    # 若两者都未设置, 回退读取 env_file 指定的 .env 文件里的同名变量。
+    # 本项目自带 .env（见 .env.example 模板），完全独立于 DB-GPT / RongNengRAG。
+    api_key_env: "DEEPSEEK_API_KEY"
+    env_file: ".env"
+    temperature: 0.1
+    max_tokens: 4096
+    # DeepSeek requests are synchronous inside the legacy ReAct stream.  Keep
+    # provider failures bounded so the UI receives an error instead of
+    # appearing frozen for minutes.
+    timeout: 60
+    max_retries: 0
+    analysis_route: large
+    provider: deepseek
+  # 可选的模型列表（/ask 带 model 字段选择；name 用于前端展示）
+  llms:
+    - name: "deepseek-v4-flash"
+      label: "DeepSeek V4 Flash"
+      base_url: "https://api.deepseek.com/v1"
+      model: "deepseek-v4-flash"
+      api_key: ""
+      api_key_env: "DEEPSEEK_API_KEY"
+      env_file: ".env"
+      temperature: 0.1
+      max_tokens: 8192
+      timeout: 60
+      max_retries: 0
+      analysis_route: large
+      provider: deepseek
+    - name: "Qwen3.8-27B"
+      label: "Qwen3.8-27B (阿里百炼)"
+      base_url: ""
+      base_url_env: "BAILIAN_API_BASE"
+      model: "qwen3.8-27b"
+      api_key: ""
+      api_key_env: "BAILIAN_API_KEY"
+      env_file: ".env"
+      # Keep the model-driven SQL/report path enabled for a fair comparison.
+      analysis_route: large
+      model_size_b: 27
+      temperature: 0.1
+      max_tokens: 8192
+      timeout: 300
+      max_retries: 0
+      stream: true
+      provider: bailian
+    - name: "Qwen3.5-27B-ModelScope"
+      label: "Qwen3.5-27B (ModelScope)"
+      base_url: "https://api-inference.modelscope.cn/v1"
+      model: "Qwen/Qwen3.5-27B"
+      api_key: ""
+      api_key_env: "MODELSCOPE_API_KEY"
+      env_file: ".env"
+      # Qwen3.5's OpenAI-compatible ModelScope route accepts the chat-template
+      # switch in extra_body; disable thinking so ReAct emits visible actions.
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+      stream: true
+      temperature: 0.7
+      max_tokens: 8192
+      timeout: 300
+      # ModelScope occasionally closes the TLS connection before the first
+      # streamed response; let the OpenAI client retry transient connection
+      # failures without requiring the user to resubmit the question.
+      max_retries: 2
+      analysis_route: large
+      model_size_b: 27
+      provider: modelscope
+    - name: "Qwen3.8-27B-ModelScope"
+      label: "Qwen3.8-27B (ModelScope)"
+      base_url: "https://api-inference.modelscope.cn/v1"
+      model: "Qwen/Qwen3.8-27B"
+      api_key: ""
+      api_key_env: "MODELSCOPE_API_KEY"
+      env_file: ".env"
+      extra_body:
+        enable_thinking: false
+      stream: true
+      temperature: 0.7
+      max_tokens: 8192
+      timeout: 300
+      max_retries: 2
+      analysis_route: large
+      model_size_b: 27
+      provider: modelscope
+    - name: "Qwen3-32B-ModelScope"
+      label: "Qwen3-32B (ModelScope)"
+      base_url: "https://api-inference.modelscope.cn/v1"
+      model: "Qwen/Qwen3-32B"
+      api_key: ""
+      api_key_env: "MODELSCOPE_API_KEY"
+      env_file: ".env"
+      extra_body:
+        enable_thinking: false
+      stream: true
+      temperature: 0.7
+      max_tokens: 8192
+      timeout: 300
+      max_retries: 2
+      analysis_route: large
+      model_size_b: 32
+      provider: modelscope
+    - name: "Qwen3-4B"
+      label: "Qwen3-4B (本地 vLLM)"
+      base_url: "http://192.168.0.201:18000/v1"
+      model: "/data/models/Qwen/Qwen3-4B"
+      api_key: ""
+      api_key_env: ""
+      # Qwen3 reasoning is disabled for the ReAct contract.  The agent needs
+      # a short, deterministic Action/Action Input response each round.
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+      temperature: 0.1
+      max_tokens: 16384
+      timeout: 300
+      analysis_route: small
+      model_size_b: 4
+      provider: vllm
+    - name: "Qwen3-4B-thinking"
+      label: "Qwen3-4B (思考模式)"
+      base_url: "http://192.168.0.201:18000/v1"
+      model: "/data/models/Qwen/Qwen3-4B"
+      api_key: ""
+      api_key_env: ""
+      # Keep all sampling and agent variables equal to Qwen3-4B; only enable
+      # Qwen3's native reasoning output for the A/B experiment.
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: true
+      temperature: 0.1
+      max_tokens: 16384
+      timeout: 300
+      analysis_route: small
+      model_size_b: 4
+      provider: vllm
+    - name: "Qwen2.5-Coder-14B-Instruct-AWQ"
+      label: "Qwen2.5-Coder-14B-Instruct-AWQ (本地 vLLM)"
+      base_url: "http://192.168.0.201:18001/v1"
+      # Must match the served model id returned by GET /v1/models.
+      model: "/data/models/Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
+      api_key: ""
+      api_key_env: ""
+      temperature: 0.1
+      max_tokens: 4096
+      timeout: 300
+      max_retries: 0
+      # Explicit large route enables a real LLM call for connectivity testing;
+      # the default size-based route would classify a 14B model as small.
+      analysis_route: large
+      model_size_b: 14
+      provider: vllm
+    - name: "Qwen3-14B-AWQ"
+      label: "Qwen3-14B-AWQ (本地 vLLM · 18002)"
+      # Keep the previous frontend/client value working during rollout.
+      aliases:
+        - "local-vllm-18002"
+      base_url: "http://192.168.0.201:18002/v1"
+      # Confirmed by GET http://192.168.0.201:18002/v1/models.
+      model: "/data/models/Qwen/Qwen3-14B-AWQ"
+      api_key: ""
+      api_key_env: ""
+      temperature: 0.1
+      max_tokens: 4096
+      timeout: 300
+      max_retries: 0
+      # Keep this comparable to the report tests, which explicitly exercise
+      # the model-driven SQL and HTML generation path.
+      analysis_route: large
+      provider: vllm
+    - name: "Qwen3-VL-8B-Instruct"
+      label: "Qwen3-VL-8B-Instruct (ModelScope)"
+      base_url: "https://api-inference.modelscope.cn/v1"
+      model: "Qwen/Qwen3-VL-8B-Instruct"
+      api_key: ""
+      api_key_env: "MODELSCOPE_API_KEY"
+      # RongNengRAG's .env can be used locally without copying the secret into
+      # this repository. Set MODELSCOPE_API_KEY in the process environment in
+      # production; this path is only a Windows-development fallback.
+      env_file: "D:/git/RongNengRAG/.env"
+      temperature: 0.7
+      max_tokens: 16384
+      timeout: 300
+      analysis_route: small
+      model_size_b: 8
+      provider: modelscope
+    - name: "Qwen3-14B"
+      label: "Qwen3-14B (ModelScope)"
+      base_url: "https://api-inference.modelscope.cn/v1"
+      model: "Qwen/Qwen3-14B"
+      api_key: ""
+      api_key_env: "MODELSCOPE_API_KEY"
+      env_file: "D:/git/RongNengRAG/.env"
+      # ModelScope API-Inference expects enable_thinking directly in the
+      # request extra_body. This differs from vLLM's chat_template_kwargs.
+      extra_body:
+        enable_thinking: false
+      temperature: 0.7
+      # ModelScope's Qwen3-14B route is stable at 4096. Larger output budgets
+      # either time out (8192) or return empty choices (16384/32768).
+      max_tokens: 4096
+      timeout: 300
+      analysis_route: small
+      model_size_b: 14
+      provider: modelscope
+    - name: "Qwen3-30B-A3B-Instruct-2507"
+      label: "Qwen3-30B-A3B-Instruct-2507 (ModelScope)"
+      base_url: "https://api-inference.modelscope.cn/v1"
+      model: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+      api_key: ""
+      api_key_env: "MODELSCOPE_API_KEY"
+      env_file: "D:/git/RongNengRAG/.env"
+      # ModelScope API-Inference format; this is not vLLM's
+      # chat_template_kwargs format.
+      extra_body:
+        enable_thinking: false
+      # ModelScope's hosted route responds reliably in the official streaming
+      # format at this output budget; the non-streaming request can hang.
+      stream: true
+      temperature: 0.7
+      max_tokens: 16384
+      timeout: 300
+      analysis_route: large
+      model_size_b: 30
+      provider: modelscope
+    - name: "Qwen3-Coder-30B-A3B-Instruct"
+      label: "Qwen3-Coder-30B-A3B-Instruct (ModelScope)"
+      base_url: "https://api-inference.modelscope.cn/v1"
+      model: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+      api_key: ""
+      api_key_env: "MODELSCOPE_API_KEY"
+      env_file: "D:/git/RongNengRAG/.env"
+      extra_body:
+        enable_thinking: false
+      # Keep the official streaming-compatible path used by the neighboring
+      # Qwen3-30B-A3B ModelScope model.
+      stream: true
+      temperature: 0.7
+      # 4096 is the highest verified responsive output budget for this
+      # hosted Coder route; 16384 did not return within the test window.
+      max_tokens: 4096
+      timeout: 300
+      analysis_route: large
+      model_size_b: 30
+      provider: modelscope
+  agent:
+    # Large/DeepSeek 保留原有自由 ReAct 探索余量；小模型不走此链路。
+    max_loops: 100
+    sql_max_rows: 500
+    max_llm_calls: 100
+    max_tool_calls: 100
+    max_sql_calls: 50
+    max_total_tokens: 200000    # conservative char-based estimate without tokenizer
+    max_prompt_chars: 600000
+    max_seconds: 300
+    max_conversation_llm_calls: 100
+    max_conversation_tool_calls: 100
+    max_conversation_sql_calls: 50
+    max_conversation_tokens: 500000

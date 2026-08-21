@@ -1,0 +1,1474 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Excel Agent — 工作簿审核 / 问答 / 报告</title>
+<style>
+  :root { --teal:#0f9c8f; --teal-dark:#0b7a70; --bg:#f5f7fa; --border:#e4e7ed; --text:#303133; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+  header { background:var(--teal); color:#fff; padding:12px 20px; font-size:16px; font-weight:600; }
+  header small { font-weight:400; opacity:.85; margin-left:10px; }
+  .wrap { display:flex; gap:14px; padding:14px; height:calc(100vh - 48px); }
+  .panel { background:#fff; border:1px solid var(--border); border-radius:8px; overflow:hidden; display:flex; flex-direction:column; }
+  .side { width:260px; flex-shrink:0; }
+  .main { flex:1; min-width:0; }
+  .panel-head { padding:10px 14px; border-bottom:1px solid var(--border); font-weight:600; display:flex; align-items:center; justify-content:space-between; }
+  .list { overflow-y:auto; flex:1; }
+  .item { padding:10px 14px; border-bottom:1px solid #f0f2f5; cursor:pointer; }
+  .item:hover { background:#f8faf9; }
+  .item.active { background:#e8f7f5; border-left:3px solid var(--teal); }
+  .item b { display:block; font-size:13px; }
+  .item small { color:#909399; }
+  .item { position:relative; }
+  .item-del { position:absolute; right:10px; top:50%; transform:translateY(-50%); cursor:pointer; color:#c0c4cc; font-size:14px; opacity:0; transition:opacity .15s, color .15s; }
+  .item:hover .item-del { opacity:1; }
+  .item-del:hover { color:#f56c6c; }
+  .tag { font-size:11px; padding:1px 6px; border-radius:3px; margin-left:6px; }
+  .tag.ready,.tag.active { background:#e1f3d8; color:#67c23a; }
+  .tag.draft { background:#fdf6ec; color:#e6a23c; }
+  .tag.failed { background:#fef0f0; color:#f56c6c; }
+  .tag.parsing,.tag.superseded { background:#f4f4f5; color:#909399; }
+  .btn { border:1px solid var(--border); background:#fff; border-radius:5px; padding:5px 12px; cursor:pointer; font-size:13px; }
+  .btn:hover { border-color:var(--teal); color:var(--teal); }
+  .btn.primary { background:var(--teal); color:#fff; border-color:var(--teal); }
+  .btn.primary:hover { background:var(--teal-dark); }
+  .btn.danger { color:#b42318; border-color:#f2b8b5; }
+  .btn.danger:hover { color:#fff; background:#c94b45; border-color:#c94b45; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .body { padding:14px; overflow-y:auto; flex:1; }
+  /* QA owns the panel height: its three content columns scroll internally,
+     while the composer remains available at the bottom of the panel. */
+  .body.qa-body { display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+  .qa-body .qa-wrap { flex:1 1 auto; min-height:0; height:auto; }
+  .qa-body .input-row {
+    flex:0 0 auto; position:sticky; bottom:0; z-index:20;
+    margin:10px -14px -14px; padding:10px 14px;
+    background:rgba(255,255,255,.96); box-shadow:0 -4px 12px rgba(15,23,42,.10);
+    backdrop-filter:blur(6px);
+  }
+  .sheets { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+  .sheet-chip { padding:4px 10px; border:1px solid var(--border); border-radius:5px; cursor:pointer; font-size:13px; }
+  .sheet-chip.active { border-color:var(--teal); background:#e8f7f5; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th,td { border:1px solid var(--border); padding:4px 6px; text-align:left; }
+  th { background:#f7f9fc; white-space:nowrap; }
+  td[contenteditable="true"]:focus { outline:2px solid var(--teal); }
+  .preview { max-height:260px; overflow:auto; }
+  .field-row { display:flex; gap:8px; align-items:center; margin:4px 0; }
+  .field-row input,.field-row select { border:1px solid var(--border); border-radius:4px; padding:4px 6px; font-size:13px; }
+  .warn { color:#b8860b; margin:3px 0; font-size:13px; }
+  .err { color:#f56c6c; margin:3px 0; font-size:13px; }
+  .qa-area { display:flex; flex-direction:column; height:100%; }
+  .msg-scroll { flex:1; overflow-y:auto; padding:10px; }
+  .msg { margin:8px 0; }
+  .msg.user { text-align:right; }
+  .msg .bubble { display:inline-block; max-width:85%; padding:8px 12px; border-radius:8px; background:#f0f2f5; text-align:left; white-space:pre-wrap; }
+  .msg.user .bubble { background:var(--teal); color:#fff; }
+  .sql-line { font-family:Consolas,monospace; font-size:12px; background:#f7f9fc; padding:4px 8px; border-radius:4px; margin:4px 0; white-space:pre-wrap; }
+  .report-iframe { width:100%; height:420px; border:1px solid var(--border); border-radius:6px; margin-top:6px; }
+  .input-row { display:flex; gap:8px; padding:10px; border-top:1px solid var(--border); }
+  .input-row input { flex:1; border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:14px; }
+  .input-row .model-select { border:1px solid var(--border); border-radius:5px; padding:7px 8px; font-size:12px; background:#fff; color:var(--text); min-width:150px; }
+  .muted { color:#909399; font-size:12px; }
+  .bar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .warn-check { margin:2px 0; }
+  .btn.small { padding:2px 8px; font-size:12px; }
+  /* ---- Manus-style agent execution panel ---- */
+  .qa-wrap { display:flex; gap:12px; height:100%; }
+  .qa-context { background:#17232b; color:#f8f5ed; border-radius:8px; padding:12px 14px; margin-bottom:10px; display:grid; grid-template-columns:minmax(180px,1.1fr) minmax(240px,1.4fr) minmax(220px,1fr); gap:12px; align-items:stretch; }
+  .qa-context-card { min-width:0; border-left:3px solid #238b82; padding:2px 0 2px 10px; }
+  .qa-context-card.route-large { border-left-color:#d98c35; }
+  .qa-context-card.route-unknown { border-left-color:#6f7d82; }
+  .qa-context-label { color:#91a6a5; font:10px/1.4 "IBM Plex Mono",Consolas,monospace; letter-spacing:.08em; text-transform:uppercase; }
+  .qa-context-model { color:#f8f5ed; font-size:13px; font-weight:700; margin:3px 0 6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .qa-context-value { display:flex; gap:8px; align-items:center; margin-top:3px; font-weight:700; }
+  .route-pill { display:inline-flex; align-items:center; gap:5px; border-radius:999px; padding:2px 8px; font:11px "IBM Plex Mono",Consolas,monospace; background:#1f514d; color:#b9eee5; }
+  .route-pill.large { background:#5a4024; color:#ffd79d; }
+  .route-pill.unknown { background:#35434a; color:#d4dde0; }
+  .qa-context-note { color:#b8c5c5; font-size:11px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .profile-metrics { display:flex; gap:14px; margin-top:4px; flex-wrap:wrap; }
+  .profile-metric strong { display:block; font:700 20px/1.1 "IBM Plex Mono",Consolas,monospace; color:#fff; }
+  .profile-metric span { color:#91a6a5; font-size:10px; }
+  .domain-chips { display:flex; gap:5px; flex-wrap:wrap; margin-top:5px; }
+  .domain-chip { border:1px solid #3a5859; color:#b9eee5; border-radius:3px; padding:1px 5px; font-size:10px; }
+  .finding-strip { display:flex; flex-direction:column; gap:4px; margin-top:4px; max-height:66px; overflow-y:auto; }
+  .finding-mini { display:flex; gap:6px; align-items:baseline; min-width:0; font-size:11px; }
+  .finding-mini .finding-dot { width:6px; height:6px; flex:0 0 auto; border-radius:50%; background:#486c88; }
+  .finding-mini.high .finding-dot { background:#b95549; }
+  .finding-mini.medium .finding-dot { background:#d98c35; }
+  .finding-mini span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#f8f5ed; }
+  .finding-evidence { color:#91a6a5 !important; font:10px "IBM Plex Mono",Consolas,monospace; flex:0 0 auto; }
+  .qa-report-spec { background:#f7f9fc; border:1px solid var(--border); border-radius:8px; padding:10px; font-size:12px; }
+  .qa-report-spec-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .qa-report-spec-head strong { font-size:13px; }
+  .qa-report-spec-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+  .qa-report-spec-item { background:#fff; border:1px solid #eef0f3; border-radius:5px; padding:6px 8px; }
+  .qa-report-spec-item b { display:block; color:#303133; font-size:12px; }
+  .qa-report-spec-item small { color:#909399; font:10px Consolas,monospace; }
+  .qa-report-sections { color:#606266; margin-top:8px; }
+  .qa-report-sections span { display:inline-block; margin:2px 4px 2px 0; padding:2px 5px; background:#e8f7f5; color:#0b7a70; border-radius:3px; font-size:10px; }
+  .qa-chat { width:320px; flex-shrink:0; border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; }
+  .qa-chat .chat-head { padding:8px 10px; font-size:12px; font-weight:600; color:#909399; border-bottom:1px solid var(--border); }
+  .qa-chat .chat-list { flex:1; overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:8px; }
+  .turn-card { border:1px solid var(--border); border-radius:8px; overflow:hidden; background:#fff; }
+  .turn-card.active { border-color:var(--teal); }
+  .turn-head { padding:8px 10px; cursor:pointer; display:flex; flex-direction:column; gap:3px; }
+  .turn-head:hover { background:#f8faf9; }
+  .turn-q { font-size:12px; font-weight:600; color:#303133; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .turn-meta { font-size:10px; color:#b0b3b8; display:flex; align-items:center; gap:6px; }
+  .turn-tools-count { background:#e8f7f5; color:#0f9c8f; padding:0 5px; border-radius:8px; font-size:10px; }
+  .turn-body { border-top:1px solid #f0f2f5; padding:8px 10px; display:flex; flex-direction:column; gap:8px; max-height:340px; overflow-y:auto; }
+  .turn-tool { border:1px solid #eef0f3; border-radius:6px; overflow:hidden; }
+  .turn-tool-head { padding:5px 8px; background:#f7f9fc; font-size:11px; font-weight:600; color:#0f9c8f; display:flex; align-items:center; gap:5px; }
+  .turn-tool-head .glyph { font-size:11px; }
+  .turn-tool-body { padding:6px 8px; font-size:11px; color:#606266; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
+  .turn-ai { background:#e8f7f5; border-radius:6px; padding:6px 8px; font-size:11px; color:#0b7a70; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
+  .turn-ai .lb { font-weight:600; font-size:10px; margin-bottom:2px; }
+  .qa-steps { width:240px; flex-shrink:0; border-right:1px solid var(--border); overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:8px; }
+  .qa-detail { flex:1; min-width:0; overflow-y:auto; padding:4px 8px; }
+  .qa-live-status { display:flex; align-items:center; gap:8px; margin:6px 0 10px; padding:8px 10px; border:1px solid #d7ebe8; border-radius:7px; background:#f3fbfa; color:#0b7a70; font-size:12px; }
+  .qa-live-status .pulse { width:7px; height:7px; border-radius:50%; background:#0f9c8f; box-shadow:0 0 0 0 rgba(15,156,143,.35); animation:qa-pulse 1.5s infinite; }
+  @keyframes qa-pulse { 0% { box-shadow:0 0 0 0 rgba(15,156,143,.35); } 70% { box-shadow:0 0 0 7px rgba(15,156,143,0); } 100% { box-shadow:0 0 0 0 rgba(15,156,143,0); } }
+  @media (prefers-reduced-motion:reduce) { .qa-live-status .pulse { animation:none; } }
+  .step-card { border:1px solid var(--border); border-radius:8px; overflow:hidden; background:#fff; }
+  .step-card.running { border-color:#409eff; }
+  .step-card.failed { border-color:#f56c6c; }
+  .step-head { display:flex; align-items:center; gap:8px; padding:8px 10px; cursor:pointer; font-size:13px; }
+  .step-head:hover { background:#f8faf9; }
+  .step-icon { width:26px; height:26px; border-radius:6px; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+  .step-icon.sql { background:#e8f7f5; color:#0f9c8f; }
+  .step-icon.html { background:#fdf6ec; color:#e6a23c; }
+  .step-icon.todo { background:#f0f2f5; color:#606266; }
+  .step-icon.err { background:#fef0f0; color:#f56c6c; }
+  .step-title { flex:1; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .step-status { font-size:11px; padding:1px 6px; border-radius:3px; }
+  .step-status.running { background:#ecf5ff; color:#409eff; }
+  .step-status.done { background:#e1f3d8; color:#67c23a; }
+  .step-status.failed { background:#fef0f0; color:#f56c6c; }
+  .step-body { border-top:1px solid #f0f2f5; padding:10px; display:flex; flex-direction:column; gap:10px; }
+  .sql-card { border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .sql-head { display:flex; align-items:center; gap:8px; padding:6px 10px; background:#f7f9fc; border-bottom:1px solid var(--border); font-size:12px; }
+  .sql-badge { font-size:10px; padding:1px 6px; border-radius:3px; font-weight:600; }
+  .sql-badge.db { background:#e8f7f5; color:#0f9c8f; }
+  .sql-badge.ro { background:#fef0f0; color:#f56c6c; }
+  .sql-body { background:#0f172a; padding:10px; overflow-x:auto; }
+  .sql-body pre { margin:0; font:12px/1.6 Consolas,Menlo,monospace; color:#e6edf3; white-space:pre-wrap; word-break:break-all; }
+  .kw { color:#569cd6; font-weight:600; } .st { color:#ce9178; } .nm { color:#b5cea8; } .pl { color:#e6edf3; }
+  .html-tabs { position:relative; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .html-tabbar { display:flex; align-items:center; min-height:34px; padding:0 10px; background:#f7f9fc; border-bottom:1px solid var(--border); font-size:12px; color:#606266; }
+  .html-tabbar button { padding:5px 9px; border:1px solid var(--border); border-radius:5px; background:#fff; cursor:pointer; font-size:12px; color:#606266; }
+  .html-tabbody { background:#fff; }
+  .html-tabbody iframe { width:100%; height:480px; border:none; display:block; background:#fff; }
+  .html-tabs .pdf-btn { position:absolute; right:14px; bottom:14px; z-index:3; box-shadow:0 2px 8px rgba(15,23,42,.16); }
+  .html-tabbody pre { margin:0; background:#0f172a; color:#e6edf3; padding:10px; font:12px/1.6 Consolas,Menlo,monospace; white-space:pre-wrap; word-break:break-all; max-height:480px; overflow:auto; }
+  .action-input { background:#f5f7fa; border-radius:6px; padding:8px 10px; font:12px/1.6 Consolas,Menlo,monospace; color:#606266; white-space:pre-wrap; word-break:break-all; }
+  .answer-block { background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px; }
+  .answer-block .lb { font-size:11px; font-weight:600; color:#909399; margin-bottom:4px; }
+  .btn.copy { float:right; }
+  @media (max-width:1000px) {
+    .qa-context { grid-template-columns:1fr 1fr; }
+    .qa-context-card.findings-card { grid-column:1 / -1; }
+  }
+  @media (max-width:760px) {
+    .qa-context { grid-template-columns:1fr; }
+    .qa-context-card.findings-card { grid-column:auto; }
+    .qa-body .qa-wrap { flex-direction:column; height:auto; min-height:0; }
+    .qa-chat,.qa-steps { width:100%; max-height:220px; border-right:0; border-bottom:1px solid var(--border); }
+    .qa-body .qa-detail { min-height:0; }
+    .qa-report-spec-grid { grid-template-columns:1fr; }
+  }
+</style>
+</head>
+<body>
+<header>📊 Excel Agent<small>上传 → 审核 → 确认入库 → SQL 问答 → HTML 报告</small></header>
+<div class="wrap">
+  <!-- Left: workbook list -->
+  <div class="panel side">
+    <div class="panel-head">
+      <span>📚 我的 Excel 库</span>
+      <span class="bar">
+        <input type="file" id="fileInput" accept=".xlsx,.xlsm,.csv" style="display:none">
+        <button class="btn primary small" id="uploadBtn">＋ 上传</button>
+      </span>
+    </div>
+    <div class="list" id="wbList"></div>
+  </div>
+
+  <!-- Right: review / QA / placeholder -->
+  <div class="panel main">
+    <div class="panel-head" id="mainTitle">请选择或上传一个工作簿</div>
+    <div class="body" id="mainBody">
+      <div class="muted" style="text-align:center;padding:60px 0;">从左侧选择已建库的工作簿进行问答，或上传 Excel 开始审核。</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/api/v1';
+const ACTIVE_IMPORT_KEY = 'excel-active-import';
+
+// ---------- shared state ----------
+const state = { imports: [], selected: null, view: 'list' };
+const $ = (sel) => document.querySelector(sel);
+
+// ---------- API helpers ----------
+async function api(path, opts = {}) {
+  const resp = await fetch(API + path, opts);
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`HTTP ${resp.status}: ${text.slice(0, 300)}`);
+  }
+  return resp.status === 204 ? null : resp.json();
+}
+function rememberSelectedImport(wb) {
+  if (wb && wb.import_id) localStorage.setItem(ACTIVE_IMPORT_KEY, wb.import_id);
+  else localStorage.removeItem(ACTIVE_IMPORT_KEY);
+}
+function refreshList() {
+  return api('/workbook-imports').then((list) => {
+    state.imports = list || [];
+    const savedId = localStorage.getItem(ACTIVE_IMPORT_KEY);
+    const restored = !state.selected && savedId
+      ? state.imports.find((wb) => wb.import_id === savedId)
+      : null;
+    if (restored) {
+      state.selected = restored;
+      state.view = restored.status === 'active' ? 'qa' : 'review';
+      rememberSelectedImport(restored);
+      renderMain();
+    } else {
+      renderList();
+    }
+  });
+}
+function getImport(id) { return api(`/workbook-imports/${id}`); }
+function getSheetRows(id, sid, offset = 0, limit = 100) {
+  return api(`/workbook-imports/${id}/sheets/${sid}/rows?offset=${offset}&limit=${limit}`);
+}
+function updateDraft(id, payload) {
+  return api(`/workbook-imports/${id}/draft`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+}
+function validateImport(id) { return api(`/workbook-imports/${id}/validate`, { method: 'POST' }); }
+function confirmImport(id, payload) {
+  return api(`/workbook-imports/${id}/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+}
+function listWorkbookConversations(workbookId) {
+  return api(`/workbooks/${workbookId}/conversations`);
+}
+function getWorkbookConversation(workbookId, convId) {
+  return api(`/workbooks/${workbookId}/conversations/${encodeURIComponent(convId)}`);
+}
+
+// ---------- upload ----------
+async function doUpload(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('source_channel', 'agent');
+  const resp = await fetch(API + '/workbook-imports', { method: 'POST', body: fd });
+  if (!resp.ok) throw new Error('上传失败: ' + (await resp.text()).slice(0, 300));
+  const data = await resp.json();
+  await refreshList();
+  state.selected = await getImport(data.import_id);
+  rememberSelectedImport(state.selected);
+  state.view = 'review';
+  renderMain();
+}
+
+// ---------- list rendering ----------
+function renderList() {
+  const box = $('#wbList');
+  box.innerHTML = state.imports.map((wb) => {
+    const active = state.selected && state.selected.import_id === wb.import_id;
+    return `<div class="item ${active ? 'active' : ''}" data-id="${wb.import_id}">
+      <b>${esc(wb.file_name)} <span class="tag ${esc(wb.status)}">${statusLabel(wb.status)}</span></b>
+      <small>v${wb.version} · ${(wb.sheets || []).length} Sheet · ${dataSheets(wb)} 表</small>
+      <div class="item-del" title="删除工作簿" data-del="${esc(wb.workbook_id || '')}">🗑</div>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.item').forEach((el) => {
+    el.onclick = (e) => {
+      if (e.target.closest('[data-del]')) return; // 删除按钮不触发选中
+      selectById(el.dataset.id);
+    };
+  });
+  box.querySelectorAll('[data-del]').forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      const wid = el.dataset.del;
+      if (wid) doDelete(wid, el);
+    };
+  });
+}
+async function doDelete(wid, el) {
+  const label = el.closest('.item')?.querySelector('b')?.textContent || wid;
+  if (!confirm(`确定删除工作簿「${label}」吗？\n将删除其全部版本的元数据与磁盘文件（源文件/草稿/数据库/报告）。`)) return;
+  el.textContent = '…';
+  try {
+    const resp = await fetch(`${API}/workbooks/${wid}`, { method: 'DELETE' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + (await resp.text()).slice(0, 200));
+    if (state.selected && state.selected.workbook_id === wid) {
+      state.selected = null;
+      state.view = 'list';
+      rememberSelectedImport(null);
+    }
+    await refreshList();
+    renderMain();
+  } catch (err) {
+    alert('删除失败: ' + err.message);
+    el.textContent = '🗑';
+  }
+}
+function statusLabel(s) {
+  return { ready: '可建库', draft: '需审核', active: '已建库', failed: '失败', superseded: '历史版本', parsing: '解析中' }[s] || s;
+}
+function dataSheets(wb) { return (wb.sheets || []).filter((s) => s.kind === 'data' && s.enabled !== false).length; }
+async function selectById(id) {
+  state.selected = await getImport(id);
+  rememberSelectedImport(state.selected);
+  state.view = (state.selected.status === 'active') ? 'qa' : 'review';
+  renderMain();
+}
+
+// ---------- review rendering ----------
+let reviewLocal = null;        // editable copy of the selected import
+let activeSheetId = null;
+let preview = { columns: [], rows: [] };
+let acceptedWarnings = [];
+
+async function renderReview() {
+  reviewLocal = JSON.parse(JSON.stringify(state.selected));
+  activeSheetId = reviewLocal.sheets[0] && reviewLocal.sheets[0].sheet_id;
+  acceptedWarnings = ((reviewLocal.validation && reviewLocal.validation.warnings) || []).map((w) => w.code);
+  preview = { columns: [], rows: [] };
+  await loadPreview();
+  drawReview();
+}
+async function loadPreview() {
+  const s = activeSheet();
+  if (!s || s.kind !== 'data') { preview = { columns: [], rows: [] }; return; }
+  const data = await getSheetRows(reviewLocal.import_id, s.sheet_id, 0, 50);
+  preview.columns = data.columns || [];
+  preview.rows = data.rows || [];
+}
+function activeSheet() {
+  return reviewLocal.sheets.find((s) => s.sheet_id === activeSheetId);
+}
+function drawReview() {
+  const s = activeSheet();
+  const errs = reviewLocal.validation && reviewLocal.validation.errors || [];
+  const warns = reviewLocal.validation && reviewLocal.validation.warnings || [];
+  $('#mainTitle').innerHTML = `🔍 审核 — ${esc(reviewLocal.file_name)} <span class="muted">rev ${reviewLocal.revision}</span>`;
+  const body = $('#mainBody');
+  body.className = 'body';
+  body.innerHTML = `
+    ${errs.length ? errs.map((e) => `<div class="err">✖ [${esc(codeLabel(e.code))}] ${esc(e.message)}</div>`).join('') : ''}
+    ${warns.length ? warns.map((w) => `<div class="warn">⚠ [${esc(codeLabel(w.code))}] ${esc(w.message)}</div>`).join('') : ''}
+    <div class="sheets">
+      ${reviewLocal.sheets.map((sh) => `<div class="sheet-chip ${sh.sheet_id === activeSheetId ? 'active' : ''}" data-sid="${sh.sheet_id}">
+        ${kindLabel(sh.kind)} ${esc(sh.name)} (${sh.row_count}行)</div>`).join('')}
+    </div>
+    <div class="bar">
+      类型:
+      <select id="kindSel">
+        <option value="data" ${s.kind === 'data' ? 'selected' : ''}>数据表</option>
+        <option value="metadata" ${s.kind === 'metadata' ? 'selected' : ''}>元数据</option>
+        <option value="ignored" ${s.kind === 'ignored' ? 'selected' : ''}>忽略</option>
+      </select>
+      启用: <input type="checkbox" id="enabledChk" ${s.enabled ? 'checked' : ''}>
+      ${s.kind === 'data' ? `表名: <input id="tableName" value="${esc(s.table_name || '')}" style="width:160px">
+        表头行: <input id="headerRow" type="number" value="${s.header_row}" style="width:60px">` : ''}
+      <button class="btn small" id="revalidateBtn">重新校验</button>
+    </div>
+    ${s.kind === 'data' ? renderColumns(s) : ''}
+    <div class="preview">${renderPreview()}</div>
+    ${warns.length ? `
+      <div style="margin-top:8px">
+        <b>审核警告 (${acceptedWarnings.length}/${warns.length} 已接受)</b>
+        <button class="btn small" id="allWarnBtn">${acceptedWarnings.length === warns.length ? '取消全选' : '一键全选'}</button>
+      </div>
+      ${warns.map((w) => `<div class="warn-check"><label><input type="checkbox" data-warn="${esc(w.code)}" ${acceptedWarnings.includes(w.code) ? 'checked' : ''}> [${esc(codeLabel(w.code))}] ${esc(w.message)}</label></div>`).join('')}
+    ` : ''}
+    <div class="bar" style="margin-top:12px">
+      <button class="btn" id="backBtn">返回</button>
+      <button class="btn primary" id="confirmBtn" ${errs.length ? 'disabled' : ''}>确认建库入库</button>
+    </div>
+  `;
+  // events
+  body.querySelectorAll('.sheet-chip').forEach((el) => {
+    el.onclick = async () => { activeSheetId = el.dataset.sid; await loadPreview(); drawReview(); };
+  });
+  const kindSel = $('#kindSel'); kindSel.onchange = async () => { s.kind = kindSel.value; await pushSheet(); drawReview(); };
+  const enabledChk = $('#enabledChk'); enabledChk.onchange = async () => { s.enabled = enabledChk.checked; await pushSheet(); };
+  const tableName = $('#tableName'); if (tableName) tableName.onblur = async () => { s.table_name = tableName.value; await pushSheet(); };
+  const headerRow = $('#headerRow'); if (headerRow) headerRow.onchange = async () => { s.header_row = +headerRow.value; await pushSheet(); };
+  $('#revalidateBtn').onclick = async () => {
+    reviewLocal = await validateImport(reviewLocal.import_id);
+    acceptedWarnings = ((reviewLocal.validation && reviewLocal.validation.warnings) || []).map((w) => w.code);
+    await loadPreview(); drawReview();
+  };
+  $('#backBtn').onclick = () => { state.view = 'list'; renderMain(); };
+  $('#confirmBtn').onclick = () => doConfirm();
+  body.querySelectorAll('[data-warn]').forEach((el) => {
+    el.onchange = () => {
+      const code = el.dataset.warn;
+      if (el.checked) { if (!acceptedWarnings.includes(code)) acceptedWarnings.push(code); }
+      else acceptedWarnings = acceptedWarnings.filter((c) => c !== code);
+      const ab = $('#allWarnBtn'); if (ab) ab.textContent = acceptedWarnings.length === warns.length ? '取消全选' : '一键全选';
+      $('#confirmBtn').disabled = acceptedWarnings.length < warns.length;
+    };
+  });
+  const allWarnBtn = $('#allWarnBtn');
+  if (allWarnBtn) allWarnBtn.onclick = () => {
+    acceptedWarnings = (acceptedWarnings.length === warns.length) ? [] : warns.map((w) => w.code);
+    drawReview();
+  };
+  if (warns.length) $('#confirmBtn').disabled = acceptedWarnings.length < warns.length;
+  // column edits
+  body.querySelectorAll('[data-col]').forEach((el) => {
+    const colId = el.dataset.col;
+    if (el.tagName === 'SELECT') {
+      el.onchange = async () => { const col = colById(colId); col.sql_type = el.value; await pushColumn(col); };
+    } else if (el.type === 'checkbox') {
+      el.onchange = async () => { const col = colById(colId); col.enabled = el.checked; await pushColumn(col); };
+    } else {
+      el.onblur = async () => {
+        const col = colById(colId);
+        if (el.dataset.field === 'display_name') col.display_name = el.value;
+        if (el.dataset.field === 'physical_name') col.physical_name = el.value;
+        await pushColumn(col);
+      };
+    }
+  });
+  // cell edits
+  body.querySelectorAll('td[data-cell]').forEach((td) => {
+    td.addEventListener('blur', async () => {
+      const [sid, row, colIdx] = td.dataset.cell.split(':');
+      const col = s.columns[+colIdx];
+      await updateDraft(reviewLocal.import_id, {
+        revision: reviewLocal.revision,
+        cell_updates: [{ sheet_id: sid, column_id: col.column_id, source_row: +row, value: td.textContent.trim() }],
+      });
+      reviewLocal = await getImport(reviewLocal.import_id);
+    });
+  });
+}
+function colById(id) { return activeSheet().columns.find((c) => c.column_id === id); }
+function kindLabel(k) { return { data: '表', metadata: '元', ignored: '忽略' }[k] || k; }
+const CODE_LABELS = {
+  // warnings
+  'EMPTY_HEADER': '空表头', 'MIXED_NUMERIC_PLACEHOLDER': '混合数字与占位符',
+  'HIDDEN_ROWS': '隐藏行', 'MERGED_CELLS': '合并单元格', 'FORMULAS': '公式',
+  // errors
+  'NO_DATA_SHEET': '无数据表', 'INVALID_TABLE_NAME': '非法表名',
+  'DUPLICATE_TABLE_NAME': '重复表名', 'INVALID_COLUMN_NAME': '非法列名',
+  'DUPLICATE_COLUMN_NAME': '重复列名',
+};
+function codeLabel(code) { return CODE_LABELS[code] || code; }
+function renderColumns(s) {
+  return `<div class="muted" style="margin:8px 0 4px">字段</div>
+    <table><tr><th>启用</th><th>显示名</th><th>物理名</th><th>类型</th><th>空表头</th><th>混合数字</th></tr>
+    ${s.columns.map((c) => `<tr>
+      <td><input type="checkbox" data-col="${c.column_id}" ${c.enabled ? 'checked' : ''}></td>
+      <td><input value="${esc(c.display_name)}" data-col="${c.column_id}" data-field="display_name"></td>
+      <td><input value="${esc(c.physical_name)}" data-col="${c.column_id}" data-field="physical_name"></td>
+      <td><select data-col="${c.column_id}">
+        <option ${c.sql_type === 'TEXT' ? 'selected' : ''}>TEXT</option>
+        <option ${c.sql_type === 'INTEGER' ? 'selected' : ''}>INTEGER</option>
+        <option ${c.sql_type === 'REAL' ? 'selected' : ''}>REAL</option>
+      </select></td>
+      <td>${c.empty_header ? '空' : '—'}</td>
+      <td>${c.mixed_numeric ? '混合' : '—'}</td>
+    </tr>`).join('')}</table>`;
+}
+function renderPreview() {
+  if (!preview.rows.length) return '<div class="muted" style="margin-top:8px">无预览数据</div>';
+  const cols = preview.columns;
+  return `<div class="muted" style="margin:8px 0 4px">数据预览 (前 ${preview.rows.length} 行，点击单元格可编辑)</div>
+    <table><tr>${cols.map((c) => `<th>${esc(c.display_name || c.physical_name || c.column_id)}</th>`).join('')}</tr>
+    ${preview.rows.map((r) => `<tr>${cols.map((c, i) => {
+      const v = r.values && r.values[i];
+      return `<td contenteditable="true" data-cell="${reviewLocal.sheets.find(x => x.sheet_id === activeSheetId).sheet_id}:${r.source_row}:${i}">${esc(v === null || v === undefined ? '' : v)}</td>`;
+    }).join('')}</tr>`).join('')}</table>`;
+}
+async function pushSheet() {
+  const s = activeSheet();
+  const upd = { sheet_id: s.sheet_id, enabled: s.enabled, kind: s.kind };
+  if (s.kind === 'data') { upd.table_name = s.table_name; upd.header_row = s.header_row; upd.data_start_row = s.data_start_row; }
+  reviewLocal = await updateDraft(reviewLocal.import_id, { revision: reviewLocal.revision, sheet_updates: [upd] });
+  drawReview();
+}
+async function pushColumn(col) {
+  reviewLocal = await updateDraft(reviewLocal.import_id, {
+    revision: reviewLocal.revision,
+    column_updates: [{ sheet_id: activeSheetId, column_id: col.column_id, enabled: col.enabled, display_name: col.display_name, physical_name: col.physical_name, sql_type: col.sql_type }],
+  });
+  drawReview();
+}
+async function doConfirm() {
+  const warns = reviewLocal.validation && reviewLocal.validation.warnings || [];
+  const all = warns.map((w) => w.code);
+  try {
+    const resp = await confirmImport(reviewLocal.import_id, { revision: reviewLocal.revision, accepted_warning_codes: all });
+    state.selected = { ...reviewLocal, workbook_id: resp.workbook_id, active_version: resp.version, status: 'active' };
+    rememberSelectedImport(state.selected);
+    state.view = 'qa';
+    await refreshList();
+    renderMain();
+  } catch (e) {
+    alert('建库失败: ' + e.message);
+    state.selected = await getImport(reviewLocal.import_id);
+    drawReview();
+  }
+}
+
+// ---------- QA rendering (Manus-style step display) ----------
+let qaSteps = [];          // [{id,title,status,action,actionInput,code,table,html,error}]
+let qaActiveStep = null;   // id of the expanded step
+let qaAnswer = '';
+let qaStreamStatus = '';
+let qaPlan = [];
+let qaModels = [];         // [{name, label, analysis_route}] — configured models
+let qaRoute = {
+  route: 'unknown', reason: '', model_size_b: null,
+  model_name: '', model_label: '', model_id: '',
+};
+let qaRouteOverride = 'auto';
+let qaProfile = null;
+let qaFindings = [];
+let qaReportSpec = null;
+let qaConvId = null;       // active conversation id for this workbook (multi-turn)
+let qaChat = [];           // [{round_index, user, ai, tools:[{action,observation,detail}]}] — turns
+let qaOpenTurn = null;     // round_index of the expanded turn in the chat list
+let qaTurnSteps = {};      // round_index -> steps[] — cached full execution steps per turn
+let qaCurrentRound = 0;    // round_index of the currently active turn
+const qaConvByWorkbook = {};  // workbook_id -> conv_id, keeps multi-turn across view switches
+let qaConversations = [];
+
+function qaConversationStorageKey() {
+  return `excel-agent-conversation:${state.selected?.workbook_id || ''}`;
+}
+function rememberQaConversation(convId) {
+  qaConvId = convId || null;
+  if (!state.selected?.workbook_id) return;
+  qaConvByWorkbook[state.selected.workbook_id] = qaConvId;
+  if (qaConvId) localStorage.setItem(qaConversationStorageKey(), qaConvId);
+  else localStorage.removeItem(qaConversationStorageKey());
+}
+function applyQaModelContext(context) {
+  if (!context) return;
+  qaRoute = {
+    ...qaRoute,
+    route: context.analysis_route || qaRoute.route || 'unknown',
+    reason: context.analysis_reason || qaRoute.reason || '',
+    model_size_b: context.model_size_b ?? qaRoute.model_size_b ?? null,
+    model_name: context.model_name || qaRoute.model_name || '',
+    model_label: context.model_label || qaRoute.model_label || '',
+    model_id: context.model_id || qaRoute.model_id || '',
+  };
+  renderQAContext();
+}
+function renderConversationOptions() {
+  const select = $('#qaConversation');
+  if (!select) return;
+  select.innerHTML = '<option value="">新会话</option>' + qaConversations.map((item) =>
+    `<option value="${esc(item.conv_id)}">${esc(item.title || '未命名会话')}`
+      + `${item.model_label || item.model_name ? ` · ${esc(item.model_label || item.model_name)}` : ''}</option>`
+  ).join('');
+  select.value = qaConvId || '';
+  const del = $('#qaDeleteConversation');
+  if (del) del.disabled = !qaConvId;
+}
+async function loadConversationCatalog() {
+  if (!state.selected?.workbook_id) return;
+  try {
+    qaConversations = await listWorkbookConversations(state.selected.workbook_id) || [];
+    const saved = localStorage.getItem(qaConversationStorageKey());
+    const selected = qaConversations.find((item) => item.conv_id === (saved || qaConvId))
+      || qaConversations[0];
+    rememberQaConversation(selected?.conv_id || null);
+    applyQaModelContext(selected);
+    renderConversationOptions();
+    if (qaConvId) await loadChatHistory();
+  } catch (e) {
+    qaConversations = [];
+    renderConversationOptions();
+  }
+}
+async function switchQaConversation(convId) {
+  qaSteps = [];
+  qaActiveStep = null;
+  qaAnswer = '';
+  qaStreamStatus = '';
+  qaRoute = {
+    route: 'unknown', reason: '', model_size_b: null,
+    model_name: '', model_label: '', model_id: '',
+  };
+  qaChat = [];
+  rememberQaConversation(convId);
+  renderConversationOptions();
+  if (qaConvId) await loadChatHistory();
+  else renderChatList();
+  renderQAContext();
+  renderQASteps();
+}
+function startQaConversation() {
+  qaSteps = [];
+  qaActiveStep = null;
+  qaAnswer = '';
+  qaStreamStatus = '';
+  qaRoute = {
+    route: 'unknown', reason: '', model_size_b: null,
+    model_name: '', model_label: '', model_id: '',
+  };
+  qaChat = [];
+  rememberQaConversation(null);
+  renderConversationOptions();
+  renderChatList();
+  renderQAContext();
+  renderQASteps();
+}
+
+async function deleteQaConversation() {
+  if (!qaConvId || !state.selected?.workbook_id) return;
+  const current = qaConversations.find((item) => item.conv_id === qaConvId);
+  const title = current?.title || '当前会话';
+  if (!confirm(`确定删除「${title}」吗？\n该会话的消息和工具调用记录会一并删除。`)) return;
+  const deleting = qaConvId;
+  const del = $('#qaDeleteConversation');
+  if (del) del.disabled = true;
+  try {
+    await api(`/workbooks/${state.selected.workbook_id}/conversations/${encodeURIComponent(deleting)}`, {
+      method: 'DELETE',
+    });
+    qaConversations = qaConversations.filter((item) => item.conv_id !== deleting);
+    startQaConversation();
+    // Re-read from the server so the dropdown and localStorage agree with the
+    // backend even if another tab changed the conversation list.
+    await loadConversationCatalog();
+  } catch (e) {
+    if (del) del.disabled = false;
+    alert('删除会话失败: ' + e.message);
+  }
+}
+
+function renderQA() {
+  $('#mainTitle').innerHTML = `📊 ${esc(state.selected.file_name)} <span class="tag active">已建库 v${state.selected.active_version}</span>`;
+  qaSteps = [];
+  qaActiveStep = null;
+  qaAnswer = '';
+  qaStreamStatus = '';
+  qaPlan = [];
+  qaRoute = {
+    route: 'unknown', reason: '', model_size_b: null,
+    model_name: '', model_label: '', model_id: '',
+  };
+  qaRouteOverride = 'auto';
+  qaProfile = null;
+  qaFindings = [];
+  qaReportSpec = null;
+  qaChat = [];
+  qaOpenTurn = null;
+  qaTurnSteps = {};
+  qaCurrentRound = 0;
+  // Resume the conversation for this workbook if we've talked to it before.
+  qaConvId = qaConvByWorkbook[state.selected.workbook_id]
+    || localStorage.getItem(qaConversationStorageKey())
+    || null;
+  const mainBody = $('#mainBody');
+  mainBody.className = 'body qa-body';
+  mainBody.innerHTML = `
+    <div class="qa-context" id="qaContext" aria-live="polite">
+      <div class="qa-context-card route-unknown" id="qaRouteCard">
+        <div class="qa-context-label">session model / 会话模型</div>
+        <div class="qa-context-model" id="qaSessionModel">等待请求</div>
+        <div class="qa-context-label">analysis route / 分析路由</div>
+        <div class="qa-context-value"><span class="route-pill unknown" id="qaRoutePill">等待请求</span></div>
+        <div class="qa-context-note" id="qaRouteNote">发送问题后显示实际执行链路</div>
+      </div>
+      <div class="qa-context-card">
+        <div class="qa-context-label">workbook profile / 数据画像</div>
+        <div class="profile-metrics" id="qaProfileMetrics"><span class="muted">等待画像…</span></div>
+        <div class="domain-chips" id="qaDomainChips"></div>
+      </div>
+      <div class="qa-context-card findings-card">
+        <div class="qa-context-label">evidence rail / 待核查线索</div>
+        <div class="finding-strip" id="qaFindingStrip"><span class="qa-context-note">尚未发现规则线索</span></div>
+      </div>
+    </div>
+    <div class="qa-wrap">
+      <div class="qa-chat">
+        <div class="chat-head">💬 对话记录</div>
+        <div class="chat-list" id="qaChat"></div>
+      </div>
+      <div class="qa-steps" id="qaSteps"></div>
+      <div class="qa-detail" id="qaDetail">
+        <div class="muted" style="padding:24px 8px;">对已入库的工作簿提问。系统会先标出实际分析路由，再展示画像、证据线索和结果。<br>示例：「生成通用数据分析报告」</div>
+      </div>
+    </div>
+    <div class="input-row">
+      <select id="qaModel" class="model-select" title="选择模型">
+        ${renderModelOptions()}
+      </select>
+      <select id="qaRouteOverride" class="model-select" title="选择分析路由">
+        <option value="auto" selected>自动路由</option>
+        <option value="small">规则模板</option>
+        <option value="large">模型 Agent</option>
+      </select>
+      <select id="qaConversation" class="model-select" title="历史会话">
+        <option value="">新会话</option>
+      </select>
+      <button class="btn" id="qaNewConversation" title="开始新会话">＋</button>
+      <button class="btn danger" id="qaDeleteConversation" title="删除当前会话" disabled>删除</button>
+      <input id="qaInput" placeholder="输入问题…">
+      <button class="btn primary" id="qaSend">发送</button>
+    </div>
+  `;
+  const send = () => doAsk();
+  $('#qaSend').onclick = send;
+  $('#qaInput').onkeyup = (e) => { if (e.key === 'Enter') send(); };
+  $('#qaRouteOverride').onchange = (e) => { qaRouteOverride = e.target.value; };
+  $('#qaConversation').onchange = (e) => switchQaConversation(e.target.value);
+  $('#qaNewConversation').onclick = startQaConversation;
+  $('#qaDeleteConversation').onclick = deleteQaConversation;
+  // Load full chat history if resuming a conversation.
+  renderConversationOptions();
+  loadConversationCatalog();
+  loadQaModels();
+  loadAnalysisProfile();
+}
+
+function routeLabel(route) {
+  return route === 'small' ? '规则模板' : (route === 'large' ? '模型 Agent' : '等待请求');
+}
+function routeReason(reason) {
+  return {
+    explicit: '请求或模型配置显式指定',
+    'deepseek-default': 'DeepSeek 默认走大模型链路',
+    'model-size-gte-30b': '模型规模达到 30B',
+    'model-size-below-30b-or-unknown': '30B 以下或未知规模，走模板链路',
+    'rules-and-templates': '确定性画像、标准模板和固定报告',
+  }[reason] || reason || '等待后端返回路由原因';
+}
+function renderModelOptions() {
+  if (!qaModels.length) return '<option value="">默认模型</option>';
+  return qaModels.map((m) => {
+    const route = m.analysis_route || 'small';
+    return `<option value="${esc(m.name)}">${esc(m.label || m.name)} · ${esc(routeLabel(route))}</option>`;
+  }).join('');
+}
+function renderQAContext() {
+  const card = $('#qaRouteCard');
+  const pill = $('#qaRoutePill');
+  const note = $('#qaRouteNote');
+  const model = $('#qaSessionModel');
+  if (model) {
+    const label = qaRoute.model_label || qaRoute.model_name || qaRoute.model_id;
+    const id = qaRoute.model_id && qaRoute.model_id !== label
+      ? ` · ${qaRoute.model_id}` : '';
+    model.textContent = label ? `${label}${id}` : '未记录（旧会话）';
+    model.title = model.textContent;
+  }
+  if (card && pill && note) {
+    const route = qaRoute.route || 'unknown';
+    card.className = `qa-context-card route-${route}`;
+    pill.className = `route-pill ${route}`;
+    pill.textContent = routeLabel(route);
+    const size = qaRoute.model_size_b ? ` · ${qaRoute.model_size_b}B` : '';
+    note.textContent = routeReason(qaRoute.reason) + size;
+  }
+  const metrics = $('#qaProfileMetrics');
+  const domains = $('#qaDomainChips');
+  if (metrics) {
+    if (!qaProfile) {
+      metrics.innerHTML = '<span class="qa-context-note">等待画像…</span>';
+    } else {
+      metrics.innerHTML = [
+        ['table_count', '数据表'], ['row_count', '记录'], ['column_count', '字段'],
+      ].map(([key, label]) => `<span class="profile-metric"><strong>${esc(qaProfile[key] ?? 0)}</strong><span>${label}</span></span>`).join('');
+    }
+  }
+  if (domains) {
+    domains.innerHTML = (qaProfile && qaProfile.candidate_domains || []).slice(0, 4)
+      .map((d) => `<span class="domain-chip">${esc(d.name)} ${esc(Math.round((Number(d.score) || 0) * 100))}%</span>`).join('');
+  }
+  const strip = $('#qaFindingStrip');
+  if (strip) {
+    strip.innerHTML = qaFindings.length ? qaFindings.slice(0, 4).map((finding) => {
+      const severity = finding.severity || 'info';
+      const evidence = (finding.evidence || []).join(', ') || '规则画像';
+      return `<div class="finding-mini ${esc(severity)}"><i class="finding-dot"></i><span title="${esc(finding.title)}">${esc(finding.title)}</span><span class="finding-evidence">${esc(evidence)}</span></div>`;
+    }).join('') : '<span class="qa-context-note">尚未发现规则线索</span>';
+  }
+}
+
+async function loadAnalysisProfile() {
+  if (!state.selected || !state.selected.workbook_id) return;
+  try {
+    qaProfile = await api(`/workbooks/${state.selected.workbook_id}/analysis-profile`);
+    renderQAContext();
+  } catch (e) {
+    const metrics = $('#qaProfileMetrics');
+    if (metrics) metrics.innerHTML = '<span class="qa-context-note">画像暂不可用，提问时将重试</span>';
+  }
+}
+
+async function loadQaModels() {
+  try {
+    const models = await api('/models');
+    qaModels = models || [];
+    const sel = $('#qaModel');
+    if (sel && qaModels.length) {
+      sel.innerHTML = renderModelOptions();
+    }
+  } catch (e) {
+    // Non-fatal; keep whatever models were rendered.
+  }
+}
+
+function renderChatList() {
+  const box = $('#qaChat');
+  if (!box) return;
+  box.innerHTML = qaChat.map((turn) => {
+    const open = qaOpenTurn === turn.round_index;
+    const toolsHtml = (turn.tools || []).map((t) => `
+      <div class="turn-tool">
+        <div class="turn-tool-head"><span class="glyph">${toolGlyph(t.action)}</span> ${esc(t.action || 'tool')}</div>
+        ${t.observation ? `<div class="turn-tool-body"><b>结果:</b> ${esc(truncate(t.observation, 200))}</div>` : ''}
+      </div>`).join('');
+    const aiHtml = turn.ai ? `<div class="turn-ai"><div class="lb">✅ 回答</div>${esc(truncate(turn.ai, 240))}</div>` : '';
+    const turnModel = turn.model && (turn.model.model_label || turn.model.model_name || turn.model.model_id);
+    const turnModelHtml = turnModel ? `<span title="${esc(turn.model.model_id || turnModel)}">${esc(truncate(turnModel, 36))}</span>` : '';
+    return `<div class="turn-card ${open ? 'active' : ''}">
+      <div class="turn-head" data-turn="${turn.round_index}">
+        <div class="turn-q">${esc(truncate(turn.user || '(无问题)', 80))}</div>
+        <div class="turn-meta">
+          <span>第 ${turn.round_index} 轮</span>
+          ${turnModelHtml}
+          ${turn.tools.length ? `<span class="turn-tools-count">${turn.tools.length} 次工具</span>` : ''}
+          ${turn.ai ? '<span>✅</span>' : (turn.tools.length ? '<span style="color:#909399">…</span>' : '')}
+        </div>
+      </div>
+      ${open ? `<div class="turn-body">${toolsHtml}${aiHtml}</div>` : ''}
+    </div>`;
+  }).join('');
+  box.querySelectorAll('[data-turn]').forEach((el) => {
+    el.onclick = () => {
+      const r = Number(el.dataset.turn);
+      qaOpenTurn = (qaOpenTurn === r) ? null : r;
+      renderChatList();
+      // Link the right-hand execution panel to this turn.
+      showTurnInRightPanel(r);
+    };
+  });
+  box.scrollTop = box.scrollHeight;
+}
+
+function showTurnInRightPanel(round) {
+  // Load cached steps for this round, or rebuild from the turn's tool details.
+  let steps = qaTurnSteps[round] || null;
+  if (!steps || !steps.length) {
+    const turn = qaChat.find((t) => t.round_index === round);
+    steps = turn ? rebuildStepsFromTurn(turn) : [];
+  }
+  qaSteps = steps;
+  qaCurrentRound = round;
+  qaActiveStep = steps.length ? steps[steps.length - 1].id : null;
+  const ans = qaChat.find((t) => t.round_index === round);
+  qaAnswer = ans ? (ans.ai || '') : '';
+  renderQASteps();
+  if (!steps.length) {
+    $('#qaDetail').innerHTML = '<div class="muted" style="padding:24px 8px;">该轮暂无工具执行记录</div>';
+  }
+}
+
+function rebuildStepsFromTurn(turn) {
+  // Convert persisted tool detail back into the step shape used by renderStepDetail.
+  const steps = [];
+  for (const t of turn.tools || []) {
+    const d = t.detail || {};
+    const step = {
+      id: 'hist-' + steps.length,
+      title: d.action || t.action || 'tool',
+      status: d.error ? 'failed' : 'done',
+      action: d.action || t.action || '',
+      actionInput: null,
+      code: null, table: null, html: null, error: d.error || null,
+    };
+    if (d.sql) step.code = d.sql;
+    if (d.table) step.table = d.table;
+    if (d.html) step.html = d.html;
+    steps.push(step);
+  }
+  return steps;
+}
+
+function toolGlyph(action) {
+  const a = (action || '').toLowerCase();
+  if (a.includes('sql')) return '🛢';
+  if (a.includes('html')) return '📄';
+  if (a.includes('todo')) return '📋';
+  return '⚙';
+}
+
+function truncate(s, n) {
+  s = String(s == null ? '' : s);
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+function currentTurn() {
+  if (!qaChat.length) return null;
+  return qaChat[qaChat.length - 1];
+}
+
+function appendChatMsg(role, content) {
+  // user / ai / tool append into the current (latest) turn.
+  const t = currentTurn();
+  if (role === 'user') {
+    qaChat.push({ round_index: (qaChat.length + 1), user: content, ai: '', tools: [], model: null });
+  } else if (t) {
+    if (role === 'ai') t.ai = content;
+    else if (role === 'tool') t.tools.push(content);
+  }
+  renderChatList();
+}
+
+function applyCurrentTurnModel(context) {
+  const turn = currentTurn();
+  if (!turn || !context) return;
+  turn.model = {
+    model_name: context.model_name || '',
+    model_label: context.model_label || '',
+    model_id: context.model_id || '',
+  };
+  renderChatList();
+}
+
+async function loadChatHistory() {
+  if (!qaConvId) return;
+  try {
+    const detail = await getWorkbookConversation(state.selected.workbook_id, qaConvId);
+    applyQaModelContext(detail);
+    const msgs = detail.messages || [];
+    // Rebuild turns grouped by round_index.
+    const turns = [];
+    const byRound = {};
+    for (const m of msgs) {
+      if (!byRound[m.round_index]) {
+        byRound[m.round_index] = { round_index: m.round_index, user: '', ai: '', tools: [], model: null };
+        turns.push(byRound[m.round_index]);
+      }
+      const turn = byRound[m.round_index];
+      if (m.role === 'user') {
+        turn.user = m.content;
+        if (m.meta && (m.meta.model_label || m.meta.model_name || m.meta.model_id)) {
+          turn.model = {
+            model_name: m.meta.model_name || '',
+            model_label: m.meta.model_label || '',
+            model_id: m.meta.model_id || '',
+          };
+        }
+      }
+      else if (m.role === 'ai') turn.ai = m.content;
+      else if (m.role === 'tool') {
+        const meta = m.meta || {};
+        const nextTool = {
+          action: meta.action || '',
+          observation: meta.observation || (m.content || ''),
+          detail: meta.detail || null,
+        };
+        const html = nextTool.detail && nextTool.detail.html;
+        const action = String(nextTool.action || '').toLowerCase();
+        const existing = html && action.includes('html')
+          ? turn.tools.find((tool) => {
+            const prior = tool.detail && tool.detail.html;
+            return String(tool.action || '').toLowerCase().includes('html')
+              && prior
+              && ((html.report_id && html.report_id === prior.report_id)
+                || (html.url && html.url === prior.url));
+          })
+          : null;
+        if (existing) {
+          existing.action = nextTool.action || existing.action;
+          existing.observation = nextTool.observation || existing.observation;
+          existing.detail = {
+            ...(existing.detail || {}),
+            ...(nextTool.detail || {}),
+            html: { ...((existing.detail && existing.detail.html) || {}), ...html },
+          };
+        } else {
+          turn.tools.push(nextTool);
+        }
+      } else if (m.role === 'view') {
+        try {
+          const view = JSON.parse(m.content || '{}');
+          if (view.type === 'html') {
+            // The backend stores both the auditable tool step and a DB-GPT
+            // ViewMessage for the same report. Merge them on restore so a
+            // refreshed page does not show a second "报告" tool card.
+            const existing = turn.tools.find((tool) => {
+              const html = tool.detail && tool.detail.html;
+              return String(tool.action || '').toLowerCase().includes('html')
+                && html
+                && ((html.report_id && html.report_id === view.report_id)
+                  || (html.url && html.url === view.url));
+            });
+            if (existing) {
+              existing.detail.html = { ...existing.detail.html, ...view };
+            } else {
+              turn.tools.push({
+                action: 'html_interpreter',
+                observation: '报告已生成',
+                detail: { action: 'html_interpreter', html: view },
+              });
+            }
+          }
+        } catch (e) {
+          // Ignore malformed legacy view payloads and keep other messages.
+        }
+      }
+    }
+    qaChat = turns;
+    renderChatList();
+    if (qaChat.length) showTurnInRightPanel(qaChat[qaChat.length - 1].round_index);
+  } catch (e) {
+    qaChat = [];
+  }
+}
+
+async function doAsk() {
+  const input = $('#qaInput');
+  const q = input.value.trim();
+  if (!q) return;
+  input.value = '';
+  qaSteps = [];
+  qaActiveStep = null;
+  qaAnswer = '';
+  qaStreamStatus = '正在连接模型…';
+  qaPlan = [];
+  appendChatMsg('user', q);
+  qaOpenTurn = null;
+  // The current turn's round = latest chat turn's round.
+  const cur = currentTurn();
+  qaCurrentRound = cur ? cur.round_index : (qaChat.length + 1);
+  if (!qaTurnSteps[qaCurrentRound]) qaTurnSteps[qaCurrentRound] = [];
+  renderQASteps();
+  $('#qaDetail').innerHTML = '<div class="muted" style="padding:24px 8px;">💭 思考中…</div>';
+
+  try {
+    const payload = { question: q, max_rows: 500 };
+    const modelSel = $('#qaModel');
+    if (modelSel && modelSel.value) payload.model = modelSel.value;
+    const routeSel = $('#qaRouteOverride');
+    if (routeSel && routeSel.value && routeSel.value !== 'auto') payload.analysis_route = routeSel.value;
+    if (qaConvId) payload.conv_id = qaConvId;   // continue the same conversation
+    const resp = await fetch(`${API}/workbooks/${state.selected.workbook_id}/ask`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok || !resp.body) throw new Error('请求失败 HTTP ' + resp.status);
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    const dispatchSseLine = (line) => {
+      if (!line.startsWith('data: ')) return;
+      let ev;
+      try { ev = JSON.parse(line.slice(6)); } catch { return; }
+      try {
+        handleEvent(ev);
+      } catch (eventError) {
+        // One malformed tool payload must not terminate the whole stream.
+        console.error('SSE event render failed', ev, eventError);
+        $('#qaDetail').innerHTML += `<div class="err" style="margin-top:10px">⚠ 实时事件显示失败：${esc(eventError.message)}</div>`;
+      }
+    };
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split(/\r?\n/);
+      buf = lines.pop() || '';
+      lines.forEach(dispatchSseLine);
+    }
+    buf += dec.decode();
+    buf.split(/\r?\n/).forEach(dispatchSseLine);
+  } catch (e) {
+    $('#qaDetail').innerHTML += `<div class="err" style="margin-top:10px">⚠ ${esc(e.message)}</div>`;
+  }
+}
+
+function handleEvent(ev) {
+  if (ev.type === 'session' && ev.conv_id) {
+    rememberQaConversation(ev.conv_id);
+    applyQaModelContext(ev);
+    applyCurrentTurnModel(ev);
+    renderConversationOptions();
+  } else if (ev.type === 'analysis_route') {
+    applyQaModelContext({
+      ...ev,
+      analysis_route: ev.route || 'unknown',
+      analysis_reason: ev.reason || '',
+    });
+  } else if (ev.type === 'status') {
+    qaStreamStatus = ev.message || (ev.status === 'thinking' ? '模型正在分析…' : ev.status || '处理中…');
+    renderQASteps();
+  } else if (ev.type === 'profile') {
+    qaProfile = { ...qaProfile, ...ev };
+    renderQAContext();
+  } else if (ev.type === 'finding') {
+    if (!qaFindings.some((item) => item.finding_id === ev.finding_id)) qaFindings.push(ev);
+    renderQAContext();
+  } else if (ev.type === 'report_spec') {
+    qaReportSpec = ev.report || null;
+    // report_spec is metadata for the deterministic route, not a second
+    // report tool. Keep it available in the turn state, but do not add an
+    // empty tool card beside the html_interpreter report.
+    renderQASteps();
+  } else if (ev.type === 'step.start') {
+    qaStreamStatus = `${ev.title || '工具'} 执行中…`;
+    qaSteps.push({ id: ev.id, title: ev.title || 'step', status: 'running', action: ev.title,
+                   actionInput: null, code: null, table: null, html: null, error: null });
+    if (qaCurrentRound) qaTurnSteps[qaCurrentRound] = JSON.parse(JSON.stringify(qaSteps));
+    qaActiveStep = ev.id;
+    renderQASteps();
+  } else if (ev.type === 'step.meta') {
+    const s = qaSteps.find((x) => x.id === ev.id);
+    if (s) { s.action = ev.action || s.action;
+             s.actionInput = ev.action_input || s.actionInput; renderQASteps(); }
+    if (qaCurrentRound) qaTurnSteps[qaCurrentRound] = JSON.parse(JSON.stringify(qaSteps));
+  } else if (ev.type === 'step.chunk') {
+    const s = qaSteps.find((x) => x.id === ev.id);
+    if (s) {
+      if (ev.output_type === 'code') s.code = ev.content;
+      else if (ev.output_type === 'table') s.table = ev.content;
+      else if (ev.output_type === 'html') s.html = ev.content;
+      else if (ev.output_type === 'error') s.error = ev.content;
+      renderQASteps();
+    }
+    if (qaCurrentRound) qaTurnSteps[qaCurrentRound] = JSON.parse(JSON.stringify(qaSteps));
+  } else if (ev.type === 'step.done') {
+    const s = qaSteps.find((x) => x.id === ev.id);
+    if (s) {
+      s.status = (ev.status === 'done') ? 'done' : 'failed';
+      qaStreamStatus = '';
+      // Record the completed tool step into the current chat turn.
+      appendChatMsg('tool', {
+        action: s.action || s.title || '',
+        observation: s.error || (s.table ? `查询结果 ${(s.table.row_count ?? 0)} 行` : ''),
+      });
+      renderQASteps();
+    }
+    if (qaCurrentRound) qaTurnSteps[qaCurrentRound] = JSON.parse(JSON.stringify(qaSteps));
+  } else if (ev.type === 'plan.update') {
+    qaPlan = ev.tasks || [];
+  } else if (ev.type === 'html') {
+    // The html_interpreter step already owns the rendered report. The flat
+    // html event only supplies the persisted URL; merge it into that step
+    // instead of creating a duplicate, content-less "报告" tool card.
+    const htmlSteps = qaSteps.filter((step) => {
+      const action = String(step.action || step.title || '').toLowerCase();
+      return action.includes('html') || action.includes('report_spec');
+    });
+    // The deterministic small route has no html_interpreter step. In that
+    // case create one report-result card; large route reuses its existing
+    // html_interpreter card and therefore never gets a duplicate.
+    const reportStep = htmlSteps[htmlSteps.length - 1] || (() => {
+      const step = {
+        id: 'final-report', title: '完整报告', status: 'done', action: 'report',
+        actionInput: null, code: null, table: null, html: null, error: null,
+      };
+      qaSteps.push(step);
+      return step;
+    })();
+    if (reportStep) {
+      reportStep.html = {
+        ...(reportStep.html || {}),
+        url: ev.url,
+        title: ev.title || reportStep.html?.title || '分析报告',
+        ...(ev.html ? { html: ev.html } : {}),
+      };
+      reportStep.status = 'done';
+      qaActiveStep = reportStep.id;
+    }
+    if (qaCurrentRound) qaTurnSteps[qaCurrentRound] = JSON.parse(JSON.stringify(qaSteps));
+    renderQASteps();
+  } else if (ev.type === 'done') {
+    qaStreamStatus = '';
+    applyQaModelContext(ev);
+    if (ev.analysis_route) {
+      qaRoute = { ...qaRoute, route: ev.analysis_route };
+      renderQAContext();
+    }
+    qaAnswer = ev.full_answer || qaAnswer;
+    if (qaAnswer) {
+      appendChatMsg('ai', qaAnswer);   // show answer in the chat log
+    }
+    if (ev.conv_id) {
+      rememberQaConversation(ev.conv_id);
+      renderConversationOptions();
+    }
+    if (ev.report_url) {
+      const htmlSteps = qaSteps.filter((step) => {
+        const action = String(step.action || step.title || '').toLowerCase();
+        return action.includes('html') || action.includes('report_spec');
+      });
+      const reportStep = htmlSteps[htmlSteps.length - 1]
+        || qaSteps.find((step) => step.id === 'final-report')
+        || (() => {
+          const step = {
+            id: 'final-report', title: '完整报告', status: 'done', action: 'report',
+            actionInput: null, code: null, table: null, html: null, error: null,
+          };
+          qaSteps.push(step);
+          return step;
+        })();
+      if (reportStep) {
+        reportStep.html = {
+          ...(reportStep.html || {}),
+          url: ev.report_url,
+          title: ev.report_title || reportStep.html?.title || '分析报告',
+        };
+        reportStep.status = 'done';
+        qaActiveStep = reportStep.id;
+      }
+    }
+    if (ev.conv_id) loadConversationCatalog();
+    renderQASteps();
+  } else if (ev.type === 'error') {
+    qaStreamStatus = '';
+    $('#qaDetail').innerHTML += `<div class="err" style="margin-top:10px">⚠ ${esc(ev.error)}</div>`;
+  }
+}
+
+function renderQASteps() {
+  const box = $('#qaSteps');
+  box.innerHTML = qaSteps.map((s) => {
+    const stClass = s.status === 'running' ? 'running' : (s.status === 'failed' ? 'failed' : 'done');
+    const icon = stepIcon(s.action);
+    return `<div class="step-card ${stClass} ${qaActiveStep === s.id ? '' : ''}" data-step="${esc(s.id)}">
+      <div class="step-head" data-toggle="${esc(s.id)}">
+        <span class="step-icon ${icon.cls}">${icon.glyph}</span>
+        <span class="step-title">${esc(s.title)}</span>
+        <span class="step-status ${stClass}">${stClass === 'running' ? '执行中' : (stClass === 'failed' ? '失败' : '完成')}</span>
+      </div>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('[data-toggle]').forEach((el) => {
+    el.onclick = () => { qaActiveStep = el.dataset.toggle; renderQASteps(); };
+  });
+  // render detail of active step
+  const detail = $('#qaDetail');
+  const active = qaSteps.find((s) => s.id === qaActiveStep) || qaSteps[qaSteps.length - 1];
+  if (active) detail.innerHTML = renderStepDetail(active);
+  else if (qaAnswer) {
+    // No tool steps at all (model answered directly) — show the answer.
+    detail.innerHTML = `<div class="answer-block"><div class="lb">✅ 回答</div>${esc(qaAnswer)}</div>`;
+  } else if (qaStreamStatus) {
+    detail.innerHTML = `<div class="qa-live-status" aria-live="polite"><span class="pulse"></span><span>${esc(qaStreamStatus)}</span></div>`;
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function stepIcon(action) {
+  const a = (action || '').toLowerCase();
+  if (a.includes('sql')) return { glyph: '🛢', cls: 'sql' };
+  if (a.includes('html')) return { glyph: '📄', cls: 'html' };
+  if (a.includes('todo')) return { glyph: '📋', cls: 'todo' };
+  if (a.includes('report')) return { glyph: '📄', cls: 'html' };
+  return { glyph: '⚙', cls: 'todo' };
+}
+
+function renderStepDetail(s) {
+  let html = '';
+  // Keep Action Input and generated HTML as execution details, not user UI.
+  // The report iframe below is the single user-facing result for HTML tools.
+  if (s.action && String(s.action).toLowerCase().includes('sql') && s.code) {
+    html += renderSqlCard(s.code);
+  }
+  if (s.table && s.table.columns) {
+    html += renderResultTable({ columns: s.table.columns, rows: s.table.rows, row_count: s.table.row_count, truncated: s.table.truncated });
+  }
+  if (s.reportSpec) {
+    const spec = s.reportSpec;
+    const kpis = (spec.kpis || []).slice(0, 4).map((item) => `
+      <div class="qa-report-spec-item"><b>${esc(item.label)}：${esc(item.value)}</b><small>${esc(item.fact_id || '')}</small></div>
+    `).join('');
+    const sections = (spec.sections || []).map((section) => `<span>${esc(section.title || section.id)}</span>`).join('');
+    html += `<div class="qa-report-spec">
+      <div class="qa-report-spec-head"><span class="sql-badge db">REPORT JSON</span><strong>${esc(spec.title || '结构化报告')}</strong></div>
+      <div class="qa-report-spec-grid">${kpis || '<span class="muted">暂无指标</span>'}</div>
+      <div class="qa-report-sections">章节：${sections || '<span>暂无</span>'}</div>
+    </div>`;
+  }
+  if (s.html || (s.action && String(s.action).toLowerCase().includes('html'))) {
+    html += renderHtmlTabs(s);
+  }
+  if (s.error) html += `<div class="err">✖ ${esc(s.error)}</div>`;
+  if (s.status === 'running') html += `<div class="muted">⏳ 执行中…</div>`;
+  if (qaStreamStatus && s.status !== 'running') {
+    html += `<div class="qa-live-status" aria-live="polite"><span class="pulse"></span><span>${esc(qaStreamStatus)}</span></div>`;
+  }
+  if (qaAnswer && (qaActiveStep === s.id || qaSteps.indexOf(s) === qaSteps.length - 1)) {
+    html += `<div class="answer-block"><div class="lb">✅ 回答</div>${esc(qaAnswer)}</div>`;
+  }
+  return html || '<div class="muted">等待输出…</div>';
+}
+
+function renderSqlCard(sql) {
+  const copy = `onclick="navigator.clipboard.writeText(${JSON.stringify(sql)});this.textContent='已复制'"`;
+  return `<div class="sql-card">
+    <div class="sql-head">
+      <span class="sql-badge db">SQL Query</span>
+      <span class="sql-badge ro">READ ONLY</span>
+      <span style="flex:1"></span>
+      <button class="btn copy small" ${copy}>复制</button>
+    </div>
+    <div class="sql-body"><pre>${highlightSQL(sql)}</pre></div>
+  </div>`;
+}
+
+function highlightSQL(sql) {
+  let out = '';
+  let remaining = String(sql);
+  const kw = /^(SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|FULL|CROSS|ON|AND|OR|NOT|IN|EXISTS|BETWEEN|LIKE|IS|NULL|AS|CASE|WHEN|THEN|ELSE|END|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|OFFSET|UNION|ALL|DISTINCT|COUNT|SUM|AVG|MIN|MAX|COALESCE|CAST|DESC|ASC)\b/i;
+  let guard = 0;
+  while (remaining && guard++ < 100000) {
+    const s = remaining.match(/^('(?:[^']|'')*')/);
+    if (s) { out += `<span class="st">${esc(s[1])}</span>`; remaining = remaining.slice(s[1].length); continue; }
+    const n = remaining.match(/^(\b\d+(?:\.\d+)?\b)/);
+    if (n) { out += `<span class="nm">${esc(n[1])}</span>`; remaining = remaining.slice(n[1].length); continue; }
+    const k = remaining.match(kw);
+    if (k) { out += `<span class="kw">${esc(k[1])}</span>`; remaining = remaining.slice(k[1].length); continue; }
+    out += esc(remaining[0]); remaining = remaining.slice(1);
+  }
+  return out;
+}
+
+function renderHtmlTabs(s) {
+  // The HTML returned by html_interpreter is the report itself. Render that
+  // exact document; do not add a second presentation shell around it.
+  const raw = (s.html && s.html.html) ? s.html.html : (s.code || '');
+  const url = s.html && s.html.url;
+  const rawTitle = (s.html && s.html.title) || '分析报告';
+  const title = /^(report|html report)$/i.test(rawTitle) ? '分析报告' : rawTitle;
+  const pdfUrl = url ? `${url.replace(/\/$/, '')}/pdf` : '';
+  const frame = raw
+    ? `<iframe class="report-frame" srcdoc="${esc(raw)}" loading="lazy" sandbox="allow-modals allow-same-origin" referrerpolicy="no-referrer"></iframe>`
+    : (url
+      ? `<iframe class="report-frame" src="${esc(url)}" loading="lazy" sandbox="allow-modals allow-same-origin" referrerpolicy="no-referrer"></iframe>`
+      : '<div class="muted" style="padding:10px">等待报告…</div>');
+  return `<div class="html-tabs">
+    <div class="html-tabbar">
+      <span class="html-report-title">${esc(title)}</span>
+      <span style="flex:1"></span>
+      ${(raw || url) ? `<button class="btn small pdf-btn" data-pdf="${esc(pdfUrl)}">⬇ 下载 PDF</button>` : ''}
+    </div>
+    <div class="html-tabbody">
+      <div class="tab-pane" data-pane="preview">${frame}</div>
+    </div>
+  </div>`;
+}
+
+function renderResultTable(ev) {
+  if (!ev.columns || !ev.rows) return '';
+  return `<div class="muted" style="margin:6px 0 4px">查询结果 (${ev.row_count} 行${ev.truncated ? ', 已截断' : ''})</div>
+    <table><tr>${ev.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>
+    ${ev.rows.map((r) => `<tr>${r.map((v) => `<td>${esc(v === null ? '' : v)}</td>`).join('')}</tr>`).join('')}</table>`;
+}
+
+// Tab switching for HTML report cards (delegated)
+document.addEventListener('click', (e) => {
+  const tabBtn = e.target.closest('.tab-btn');
+  if (tabBtn) {
+    const tabs = tabBtn.closest('.html-tabs');
+    tabs.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+    tabBtn.classList.add('active');
+    const target = tabBtn.dataset.tab;
+    tabs.querySelectorAll('.tab-pane').forEach((p) => {
+      p.style.display = (p.dataset.pane === target) ? '' : 'none';
+    });
+  }
+  // "下载 PDF" — prefer the server-generated PDF; use browser print only as
+  // a fallback for old reports/servers that do not expose /pdf yet.
+  const pdfBtn = e.target.closest('.pdf-btn');
+  if (pdfBtn) {
+    const tabs = pdfBtn.closest('.html-tabs');
+    const iframe = tabs ? tabs.querySelector('iframe') : null;
+    const pdfUrl = pdfBtn.dataset.pdf;
+    const originalText = pdfBtn.textContent;
+    pdfBtn.disabled = true;
+    pdfBtn.textContent = '生成 PDF…';
+    const printFallback = () => {
+      if (!iframe || !iframe.contentWindow) throw new Error('报告尚未加载完成');
+      const print = () => {
+        iframe.contentWindow.focus();
+        iframe.contentWindow.print();
+      };
+      if (iframe.contentDocument && iframe.contentDocument.readyState === 'complete') {
+        setTimeout(print, 50);
+      } else {
+        iframe.addEventListener('load', () => setTimeout(print, 50), { once: true });
+        setTimeout(print, 1000);
+      }
+    };
+    const download = async () => {
+      if (!pdfUrl) return printFallback();
+      const response = await fetch(pdfUrl, { headers: { Accept: 'application/pdf' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = '分析报告.pdf';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    };
+    download().catch((err) => {
+      console.warn('PDF download failed; falling back to browser print', err);
+      try { printFallback(); }
+      catch (fallbackErr) { alert('PDF 下载失败: ' + fallbackErr.message); }
+    }).finally(() => {
+      pdfBtn.disabled = false;
+      pdfBtn.textContent = originalText;
+    });
+  }
+});
+function renderResultTable(ev) {
+  if (!ev.columns || !ev.rows) return '';
+  return `<div class="muted" style="margin-top:6px">查询结果 (${ev.row_count} 行${ev.truncated ? ', 已截断' : ''})</div>
+    <table><tr>${ev.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>
+    ${ev.rows.map((r) => `<tr>${r.map((v) => `<td>${esc(v === null ? '' : v)}</td>`).join('')}</tr>`).join('')}</table>`;
+}
+
+// ---------- main dispatch ----------
+function renderMain() {
+  if (state.view === 'review') renderReview();
+  else if (state.view === 'qa') renderQA();
+  else {
+    $('#mainTitle').textContent = '请选择或上传一个工作簿';
+    const body = $('#mainBody'); body.className = 'body'; body.innerHTML = '';
+  }
+  renderList();
+}
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---------- init ----------
+$('#uploadBtn').onclick = () => $('#fileInput').click();
+$('#fileInput').onchange = () => {
+  const f = $('#fileInput').files[0];
+  if (f) doUpload(f).catch((e) => alert(e.message));
+  $('#fileInput').value = '';
+};
+refreshList();
+</script>
+</body>
+</html>

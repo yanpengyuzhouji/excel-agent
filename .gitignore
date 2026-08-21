@@ -1,0 +1,13 @@
+.env
+.venv/
+.venv-linux/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.codex-local/
+data/workbook_imports/
+
+# Local Git metadata is managed outside this workspace in this environment.
+.git/
