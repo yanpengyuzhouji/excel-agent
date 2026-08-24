@@ -549,6 +549,7 @@ let qaTurnSteps = {};      // round_index -> steps[] — cached full execution s
 let qaCurrentRound = 0;    // round_index of the currently active turn
 const qaConvByWorkbook = {};  // workbook_id -> conv_id, keeps multi-turn across view switches
 let qaConversations = [];
+let qaHistoryEpoch = 0;    // invalidates async history loads after a live turn starts
 
 function qaConversationStorageKey() {
   return `excel-agent-conversation:${state.selected?.workbook_id || ''}`;
@@ -584,8 +585,9 @@ function renderConversationOptions() {
   const del = $('#qaDeleteConversation');
   if (del) del.disabled = !qaConvId;
 }
-async function loadConversationCatalog() {
+async function loadConversationCatalog(loadHistory = true) {
   if (!state.selected?.workbook_id) return;
+  const historyEpoch = qaHistoryEpoch;
   try {
     qaConversations = await listWorkbookConversations(state.selected.workbook_id) || [];
     const saved = localStorage.getItem(qaConversationStorageKey());
@@ -594,7 +596,11 @@ async function loadConversationCatalog() {
     rememberQaConversation(selected?.conv_id || null);
     applyQaModelContext(selected);
     renderConversationOptions();
-    if (qaConvId) await loadChatHistory();
+    // Do not let a catalog request started before a live question overwrite
+    // that in-memory turn when its delayed history response eventually lands.
+    if (loadHistory && qaConvId && historyEpoch === qaHistoryEpoch) {
+      await loadChatHistory();
+    }
   } catch (e) {
     qaConversations = [];
     renderConversationOptions();
@@ -605,11 +611,15 @@ async function switchQaConversation(convId) {
   qaActiveStep = null;
   qaAnswer = '';
   qaStreamStatus = '';
+  qaPlan = [];
   qaRoute = {
     route: 'unknown', reason: '', model_size_b: null,
     model_name: '', model_label: '', model_id: '',
   };
   qaChat = [];
+  qaOpenTurn = null;
+  qaTurnSteps = {};
+  qaCurrentRound = 0;
   rememberQaConversation(convId);
   renderConversationOptions();
   if (qaConvId) await loadChatHistory();
@@ -622,16 +632,24 @@ function startQaConversation() {
   qaActiveStep = null;
   qaAnswer = '';
   qaStreamStatus = '';
+  qaPlan = [];
   qaRoute = {
     route: 'unknown', reason: '', model_size_b: null,
     model_name: '', model_label: '', model_id: '',
   };
   qaChat = [];
+  qaOpenTurn = null;
+  qaTurnSteps = {};
+  qaCurrentRound = 0;
   rememberQaConversation(null);
   renderConversationOptions();
   renderChatList();
   renderQAContext();
   renderQASteps();
+  const detail = $('#qaDetail');
+  if (detail) {
+    detail.innerHTML = '<div class="muted" style="padding:24px 8px;">已创建新会话。输入问题后开始分析。</div>';
+  }
 }
 
 async function deleteQaConversation() {
@@ -1051,6 +1069,7 @@ async function doAsk() {
   qaAnswer = '';
   qaStreamStatus = '正在连接模型…';
   qaPlan = [];
+  qaHistoryEpoch += 1;
   appendChatMsg('user', q);
   qaOpenTurn = null;
   // The current turn's round = latest chat turn's round.
@@ -1237,7 +1256,10 @@ function handleEvent(ev) {
         qaActiveStep = reportStep.id;
       }
     }
-    if (ev.conv_id) loadConversationCatalog();
+    // The live turn is already complete in qaChat.  Refresh only the
+    // conversation selector here: reloading the history can race the final
+    // answer persistence and overwrite this just-rendered answer.
+    if (ev.conv_id) loadConversationCatalog(false);
     renderQASteps();
   } else if (ev.type === 'error') {
     qaStreamStatus = '';

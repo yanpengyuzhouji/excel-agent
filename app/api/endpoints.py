@@ -535,6 +535,7 @@ async def ask_workbook(
 
     def generate():
         final_answer = ""
+        answer_persisted = False
         try:
             yield _sse({
                 "type": "session",
@@ -603,6 +604,21 @@ async def ask_workbook(
                         "model_id": model_context["model_id"],
                         "model_size_b": model_context["model_size_b"],
                     }
+                    # Persist before exposing `done` to the client.  The UI
+                    # refreshes its conversation list upon completion; if the
+                    # event arrives first, that refresh can replace the live
+                    # answer with an older history snapshot.
+                    if final_answer:
+                        try:
+                            conv.add_ai_message(final_answer)
+                            answer_persisted = True
+                            logger.info(
+                                "ask done conv=%s answer=%r",
+                                conv.conv_id,
+                                final_answer[:200],
+                            )
+                        except Exception:
+                            logger.exception("Failed to persist final answer")
                 yield _sse(event)
         except Exception as exc:
             logging.getLogger(__name__).exception("ask failed")
@@ -619,7 +635,7 @@ async def ask_workbook(
                 conv.add_budget_usage(budget.conversation_usage())
             except Exception:
                 logger.exception("Failed to persist agent budget usage")
-            if final_answer:
+            if final_answer and not answer_persisted:
                 conv.add_ai_message(final_answer)
                 logger.info("ask done conv=%s answer=%r", conv.conv_id, final_answer[:200])
             elif conv.messages:

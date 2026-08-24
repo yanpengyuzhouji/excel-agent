@@ -430,6 +430,10 @@ def build_workbook_profile(
     config = getattr(service, "config", None)
     timeout_ms = max(1, int(getattr(config, "sql_timeout_ms", 5_000)))
     max_vm_steps = max(1, int(getattr(config, "sql_vm_steps", 2_000_000)))
+    # The configured SQL limits are statement-level limits.  Profiling a
+    # workbook runs many statements (and may have many tables), so sharing a
+    # single timer/VM counter across the whole profile makes later tables fail
+    # merely because earlier tables were successfully profiled.
     started = time.perf_counter()
     vm_steps = 0
 
@@ -453,6 +457,11 @@ def build_workbook_profile(
             if not table_name:
                 continue
             try:
+                # Keep the resource guard, but start a fresh bounded profile
+                # window for each table.  This prevents one large table from
+                # silently reducing the reported number of data tables.
+                started = time.perf_counter()
+                vm_steps = 0
                 columns = _column_specs(connection, table_name, table.get("columns") or [])
                 row_count = int(
                     connection.execute(

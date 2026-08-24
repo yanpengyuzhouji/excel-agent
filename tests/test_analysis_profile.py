@@ -86,6 +86,46 @@ class WorkbookProfileTests(unittest.TestCase):
         self.assertEqual(1, profile["tables"][0]["columns"][0]["null_count"])
         self.assertEqual(1, profile["tables"][0]["columns"][1]["numeric_count"])
 
+    def test_profile_includes_every_manifest_table(self):
+        """A multi-sheet workbook must not be silently truncated in its profile."""
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "database.sqlite"
+            connection = sqlite3.connect(database_path)
+            manifest = []
+            for number in range(1, 15):
+                table_name = f"table_{number}"
+                connection.execute(f'CREATE TABLE "{table_name}" (item TEXT)')
+                connection.execute(f'INSERT INTO "{table_name}" VALUES (?)', (str(number),))
+                manifest.append(
+                    {
+                        "sheet": f"Sheet {number}",
+                        "table_name": table_name,
+                        "columns": [
+                            {
+                                "physical_name": "item",
+                                "display_name": "项目",
+                                "sql_type": "TEXT",
+                                "enabled": True,
+                            }
+                        ],
+                        "row_count": 1,
+                    }
+                )
+            connection.execute("CREATE TABLE _dbgpt_import_manifest (schema_json TEXT)")
+            connection.execute(
+                "INSERT INTO _dbgpt_import_manifest VALUES (?)",
+                (__import__("json").dumps(manifest, ensure_ascii=False),),
+            )
+            connection.commit()
+            connection.close()
+
+            profile = build_workbook_profile(_ProfileService(str(database_path)), "book-3")
+
+        self.assertEqual(14, profile["table_count"])
+        self.assertEqual([f"table_{number}" for number in range(1, 15)], [
+            item["table"] for item in profile["tables"]
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
