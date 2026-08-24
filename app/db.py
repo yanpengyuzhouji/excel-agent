@@ -38,26 +38,7 @@ def _init_engine(storage_path: str):
 def ensure_tables() -> None:
     if _engine is None:
         _init_engine(build_app_config().resolved_storage_path())
-    # Import the catalog model before create_all so existing installations get
-    # the owner-scoped multi-workbook routing table without a separate migration
-    # command.  The import is intentionally lazy to avoid the Model circular
-    # dependency during module initialization.
-    from .models import agent as _agent  # noqa: F401
-    from .models import catalog as _catalog  # noqa: F401
-    from .models import conversation as _conversation  # noqa: F401
-    from .models import workbook as _workbook  # noqa: F401
-
     Model.metadata.create_all(bind=_engine)
-    # Index metadata only; never copy business rows into the retrieval index.
-    # SQLite builds without FTS5 are supported by the DAO's keyword fallback.
-    try:
-        with _engine.begin() as connection:
-            connection.exec_driver_sql(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS workbook_catalog_fts "
-                "USING fts5(workbook_id UNINDEXED, owner_id UNINDEXED, catalog_text)"
-            )
-    except Exception:
-        pass
     # create_all does not add columns to an existing SQLite installation.
     # Assign legacy resources to the explicit `default` principal during the
     # one-way ownership migration; other principals cannot claim them.

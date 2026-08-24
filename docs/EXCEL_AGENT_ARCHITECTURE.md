@@ -34,12 +34,14 @@ flowchart TB
     MAT --> BIZ[(每工作簿每版本 SQLite)]
     IMP --> META[(workbook_meta.db 元数据)]
 
-    ASK --> ROUTE[统一 Agent 编排]
-    ROUTE --> DISCOVER[owner-filtered 目录召回]
-    DISCOVER --> REACT[ReAct Agent]
-    REACT --> SQL[每库独立只读 SQL 沙箱]
+    ASK --> ROUTE{分析路由选择}
+    ROUTE -->|大模型 / >=30B / DeepSeek| REACT[ReAct Agent]
+    ROUTE -->|小模型或未知规模| SMALL[确定性画像与模板]
+    REACT --> SQL[只读 SQL 沙箱]
+    SMALL --> SQL
     SQL --> BIZ
     REACT --> HTML[HTML 报告工具]
+    SMALL --> HTML
     HTML --> SAFE[HTML 清洗与持久化]
     SAFE --> REPORT[HTML 报告 / PDF 导出]
     ASK --> CONV[(会话与工具审计记录)]
@@ -142,15 +144,14 @@ data/workbook_imports/
 
 ## 6. Agent 技术核心
 
-### 6.1 统一 Agent 路由
+### 6.1 双路由设计
 
-问数接口现在统一走模型驱动 Agent。`select_analysis_route` 仍保留用于旧客户端兼容
-和诊断，但不会再把小模型切到规则模板：
+`select_analysis_route` 根据显式请求、模型配置和参数规模选择两条路径：
 
 | 路径 | 适用模型 | 核心策略 |
 | --- | --- | --- |
-| `agent` | 所有问数模型 | 自主发现数据源、Text2SQL、受控汇总和来源可追溯回答 |
-| 旧 `large/small` | 兼容元数据 | 仅保留为历史记录/回归基线，不作为默认问答路线 |
+| `large` | DeepSeek、显式指定、或规模 >= 30B | 模型驱动的 ReAct：自主规划、Text2SQL、生成 HTML 报告 |
+| `small` | 小于 30B 或规模未知 | 不让模型自由生成 SQL/CSS；使用确定性画像、规则和固定模板 |
 
 这样将“开放式分析能力”留给高能力模型，同时为小模型提供稳定、可复核且不依赖工具调用格式的降级路径。
 
@@ -282,3 +283,4 @@ sequenceDiagram
 | 工具与 HTML 报告持久化 | `app/agent/tools.py`、`html_sanitizer.py` |
 | 小模型画像/事实/发现/报告 | `app/analysis/` |
 | 会话与审计持久化 | `app/conversation.py`、`app/models/` |
+

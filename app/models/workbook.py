@@ -58,22 +58,6 @@ class WorkbookImportEntity(Model):
 
 
 class WorkbookDatasetDao(BaseDao):
-    def list_by_owner(
-        self, owner_id: str, limit: int = 200, offset: int = 0
-    ) -> list[WorkbookDatasetEntity]:
-        with self.session() as session:
-            rows = (
-                session.query(WorkbookDatasetEntity)
-                .filter(WorkbookDatasetEntity.owner_id == owner_id)
-                .order_by(WorkbookDatasetEntity.gmt_modified.desc())
-                .offset(max(0, int(offset)))
-                .limit(max(1, min(int(limit), 1000)))
-                .all()
-            )
-            for row in rows:
-                session.expunge(row)
-            return list(rows)
-
     def get_by_workbook_id(
         self, workbook_id: str, owner_id: Optional[str] = None
     ) -> Optional[WorkbookDatasetEntity]:

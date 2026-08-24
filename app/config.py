@@ -43,9 +43,6 @@ class AppConfig:
     sql_vm_steps: int = 2_000_000
     max_concurrent_sql: int = 4
     max_concurrent_agent_runs: int = 2
-    multi_workbook_enabled: bool = True
-    multi_workbook_max_selected: int = 5
-    multi_workbook_max_queried: int = 3
     llm: Dict[str, Any] = field(default_factory=dict)
     llms: List[Dict[str, Any]] = field(default_factory=list)
     agent: Dict[str, Any] = field(default_factory=dict)
@@ -117,14 +114,5 @@ def build_app_config(raw: Optional[Dict[str, Any]] = None) -> AppConfig:
         llm=excel.get("llm", {}),
         llms=excel.get("llms", []),
         agent=excel.get("agent", {}),
-        multi_workbook_enabled=bool(
-            excel.get("agent", {}).get("multi_workbook_enabled", True)
-        ),
-        multi_workbook_max_selected=int(
-            excel.get("agent", {}).get("max_selected_workbooks", 5)
-        ),
-        multi_workbook_max_queried=int(
-            excel.get("agent", {}).get("max_queried_workbooks", 3)
-        ),
         raw=raw,
     )

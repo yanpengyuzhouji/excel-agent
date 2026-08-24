@@ -22,11 +22,10 @@ from urllib.parse import quote
 
 from ..agent import tools
 from ..agent.budget import AgentBudget
-from ..agent.multi_workbook import run_multi_workbook_agent
-from ..agent.session import AgentConversation
 from ..agent.react_loop import run_react
 from ..analysis.profile import build_workbook_profile
 from ..analysis.routing import select_analysis_route
+from ..analysis.small_route import run_small_route
 from ..conversation import ExcelWorkbookConversation
 from ..core import blocking_func_to_async, http_error
 from ..service.llm import ExcelLLM
@@ -59,37 +58,6 @@ class AskRequest(BaseModel):
     # Optional route override for controlled A/B tests.  Otherwise the selected
     # model's config metadata and the 30B boundary choose the route.
     analysis_route: Optional[Literal["large", "small"]] = None
-
-
-class MultiWorkbookScope(BaseModel):
-    mode: Literal["auto", "selected", "space"] = "auto"
-    workbook_ids: List[str] = Field(default_factory=list, max_length=5)
-    space_id: Optional[str] = None
-
-
-class MultiWorkbookAskRequest(BaseModel):
-    question: str = Field(..., min_length=1)
-    scope: MultiWorkbookScope = Field(default_factory=MultiWorkbookScope)
-    max_rows: int = Field(default=500, ge=1, le=1000)
-    model: Optional[str] = None
-    conv_id: Optional[str] = None
-
-
-class DataSpaceRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=512)
-    description: str = Field(default="", max_length=4000)
-    workbook_ids: List[str] = Field(default_factory=list, max_length=100)
-
-
-class DatasetRelationRequest(BaseModel):
-    left_workbook_id: str
-    left_table: str
-    left_column: str
-    right_workbook_id: str
-    right_table: str
-    right_column: str
-    relation_type: str = "equality"
-    cardinality: Optional[str] = None
 
 logger = logging.getLogger(__name__)
 
@@ -504,18 +472,10 @@ async def ask_workbook(
                 if _matches_model_config(item, request.model):
                     llm_config = item
                     break
-        legacy_route = select_analysis_route(
+        route = select_analysis_route(
             llm_config, requested_route=request.analysis_route
         )
-        # All question answering now uses the model-driven Agent loop. Keep
-        # the old route metadata as a diagnostic hint for compatibility, but
-        # never fall back to the deterministic small/template route.
-        route = {
-            **legacy_route,
-            "route": "agent",
-            "reason": f"agent-only ({legacy_route.get('reason', 'configured')})",
-        }
-        llm = ExcelLLM(llm_config)
+        llm = ExcelLLM(llm_config) if route["route"] == "large" else None
         configured_model_name = (
             llm_config.get("name")
             or request.model
@@ -541,16 +501,17 @@ async def ask_workbook(
             request.question,
             meta=model_context,
         )
-        # The legacy profile/template implementation remains available as a
-        # regression tool, but is no longer part of the default ask route.
+        # Large keeps the existing model-driven ReAct path.  Small uses the
+        # deterministic profile/template/report path and does not ask a small
+        # model to invent SQL or HTML.
         structured_report = False
         max_loops = int((service.config.agent or {}).get("max_loops", 8))
         budget = AgentBudget.from_config(
             service.config.agent, prior=conv.get_budget_usage()
         )
-    except Exception as exc:
+    except BaseException:
         service.release_agent_run()
-        raise http_error(exc) from exc
+        raise
     logger.info(
         "ask conv=%s wid=%s model=%s route=%s reason=%s question=%r",
         conv.conv_id,
@@ -591,18 +552,27 @@ async def ask_workbook(
                 "model_label": model_context["model_label"],
                 "model_id": model_context["model_id"],
             })
-            events = run_react(
-                llm,
-                service,
-                workbook_id,
-                request.question,
-                history_messages=history,
-                max_loops=max_loops,
-                sql_max_rows=request.max_rows,
-                on_tool_step_full=_record_tool_step_full,
-                budget=budget,
-                structured_report=structured_report,
-            )
+            if route["route"] == "small":
+                events = run_small_route(
+                    service,
+                    workbook_id,
+                    request.question,
+                    title=request.question[:80] if "报告" in request.question else None,
+                    on_tool_step_full=_record_tool_step_full,
+                )
+            else:
+                events = run_react(
+                    llm,
+                    service,
+                    workbook_id,
+                    request.question,
+                    history_messages=history,
+                    max_loops=max_loops,
+                    sql_max_rows=request.max_rows,
+                    on_tool_step_full=_record_tool_step_full,
+                    budget=budget,
+                    structured_report=structured_report,
+                )
             for event in events:
                 # DB-GPT's StorageConversation keeps user-facing render
                 # artifacts as ViewMessage records. Persist only the report
@@ -671,365 +641,6 @@ async def ask_workbook(
             elif conv.messages:
                 # Still persist the round even if no answer (e.g. error).
                 pass
-            service.release_agent_run()
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Content-Encoding": "identity",
-        },
-    )
-
-
-@router.get("/data-catalog")
-async def list_data_catalog(
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    """Return metadata-only catalogs for the authenticated user's workbooks."""
-
-    try:
-        return await blocking_func_to_async(
-            service.list_workbook_catalog, principal, limit=200
-        )
-    except Exception as exc:
-        raise http_error(exc) from exc
-
-
-@router.get("/data-catalog/search")
-async def search_data_catalog(
-    q: str = Query(default="", max_length=300),
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    """Search only the authenticated user's metadata-only catalog."""
-
-    try:
-        return await blocking_func_to_async(
-            service.search_workbook_catalog, principal, q
-        )
-    except Exception as exc:
-        raise http_error(exc) from exc
-
-
-@router.get("/data-spaces")
-async def list_data_spaces(
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    return await blocking_func_to_async(service.list_data_spaces, principal)
-
-
-@router.post("/data-spaces")
-async def create_data_space(
-    request: DataSpaceRequest,
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    try:
-        return await blocking_func_to_async(
-            service.create_data_space,
-            principal,
-            request.name,
-            request.description,
-            request.workbook_ids,
-        )
-    except Exception as exc:
-        raise http_error(exc) from exc
-
-
-@router.patch("/data-spaces/{space_id}")
-async def update_data_space(
-    space_id: str,
-    request: DataSpaceRequest,
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    try:
-        return await blocking_func_to_async(
-            service.update_data_space,
-            space_id,
-            principal,
-            request.name,
-            request.description,
-            request.workbook_ids,
-        )
-    except Exception as exc:
-        raise http_error(exc) from exc
-
-
-@router.delete("/data-spaces/{space_id}")
-async def delete_data_space(
-    space_id: str,
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    try:
-        await blocking_func_to_async(service.delete_data_space, space_id, principal)
-        return {"space_id": space_id, "deleted": True}
-    except Exception as exc:
-        raise http_error(exc) from exc
-
-
-@router.get("/dataset-relations")
-async def list_dataset_relations(
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    return await blocking_func_to_async(service.list_dataset_relations, principal)
-
-
-@router.post("/dataset-relations")
-async def create_dataset_relation(
-    request: DatasetRelationRequest,
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    try:
-        return await blocking_func_to_async(
-            service.create_dataset_relation, principal, request.model_dump()
-        )
-    except Exception as exc:
-        raise http_error(exc) from exc
-
-
-@router.delete("/dataset-relations/{relation_id}")
-async def delete_dataset_relation(
-    relation_id: str,
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    try:
-        await blocking_func_to_async(
-            service.delete_dataset_relation, principal, relation_id
-        )
-        return {"relation_id": relation_id, "deleted": True}
-    except Exception as exc:
-        raise http_error(exc) from exc
-
-
-def _agent_conversation_dict(conv: AgentConversation) -> dict:
-    return {
-        "conv_id": conv.conv_id,
-        "owner_id": conv.owner_id,
-        "scope_type": conv.scope_type,
-        "scope": conv.scope_json,
-        "sources": conv.source_snapshot,
-        "title": conv.title,
-        "model_name": conv.model_name,
-        "model_label": conv.model_label,
-        "model_id": conv.model_id,
-        "messages": conv.messages,
-    }
-
-
-@router.get("/agent/conversations")
-async def list_agent_conversations(
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    """List global Agent conversations for the authenticated principal."""
-
-    from ..models.agent import AgentConversationDao
-
-    rows = AgentConversationDao().list(principal)
-    return [
-        {
-            "conv_id": row.conv_id,
-            "scope_type": row.scope_type,
-            "scope": json.loads(row.scope_json or "{}"),
-            "sources": json.loads(row.source_snapshot_json or "[]"),
-            "title": row.title,
-            "model_name": row.model_name,
-            "model_label": row.model_label,
-            "model_id": row.model_id,
-            "created_at": row.gmt_created.isoformat() if row.gmt_created else None,
-            "updated_at": row.gmt_modified.isoformat() if row.gmt_modified else None,
-        }
-        for row in rows
-    ]
-
-
-@router.get("/agent/conversations/{conv_id}")
-async def get_agent_conversation(
-    conv_id: str,
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    conv = AgentConversation.load(conv_id, principal)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Agent conversation not found")
-    return _agent_conversation_dict(conv)
-
-
-@router.delete("/agent/conversations/{conv_id}")
-async def delete_agent_conversation(
-    conv_id: str,
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    from ..models.agent import AgentConversationDao
-
-    if not AgentConversationDao().get(conv_id, principal):
-        raise HTTPException(status_code=404, detail="Agent conversation not found")
-    AgentConversationDao().delete(conv_id, principal)
-    return {"conv_id": conv_id, "deleted": True}
-
-
-@router.post("/agent/ask")
-async def ask_multi_workbook(
-    request: MultiWorkbookAskRequest,
-    service: WorkbookImportService = Depends(get_service),
-    principal: str = Depends(authenticate_request),
-):
-    """Owner-scoped multi-workbook Agent with isolated per-source SQL."""
-
-    if not getattr(service.config, "multi_workbook_enabled", True):
-        raise HTTPException(
-            status_code=503,
-            detail="Multi-workbook Agent is disabled by configuration",
-        )
-
-    if request.scope.mode == "selected" and not request.scope.workbook_ids:
-        raise HTTPException(
-            status_code=422,
-            detail="scope.workbook_ids is required when scope.mode is selected",
-        )
-    if request.scope.mode == "space" and not request.scope.space_id:
-        raise HTTPException(
-            status_code=422,
-            detail="scope.space_id is required when scope.mode is space",
-        )
-    if not service.try_acquire_agent_run():
-        raise HTTPException(
-            status_code=429,
-            detail="Agent concurrency limit reached; retry later",
-            headers={"Retry-After": "5"},
-        )
-    try:
-        catalogs = await blocking_func_to_async(
-            service.list_workbook_catalog, principal, limit=200
-        )
-        llm_config = service.config.llm
-        if request.model:
-            for item in service.config.llms:
-                if _matches_model_config(item, request.model):
-                    llm_config = item
-                    break
-        llm = ExcelLLM(llm_config)
-        model_context = {
-            "model_name": llm_config.get("name") or request.model or llm_config.get("model") or "agent",
-            "model_label": llm_config.get("label") or llm_config.get("name") or request.model or "agent",
-            "model_id": getattr(llm, "model_name", None) or llm_config.get("model") or request.model or "agent",
-            "analysis_route": "agent",
-        }
-        budget = AgentBudget.from_config(service.config.agent)
-        max_loops = int((service.config.agent or {}).get("max_loops", 10))
-        if request.conv_id:
-            conv = AgentConversation.load(request.conv_id, principal)
-            if not conv:
-                raise HTTPException(status_code=404, detail="Agent conversation not found")
-            history = conv.history_messages()
-        else:
-            conv = AgentConversation.create(
-                principal,
-                request.scope.mode,
-                request.scope.model_dump(),
-                title=request.question[:80],
-            )
-            history = []
-        conv.set_context(
-            model_name=model_context["model_name"],
-            model_label=model_context["model_label"],
-            model_id=model_context["model_id"],
-        )
-        conv.start_new_round()
-        conv.add_user(request.question, meta=model_context)
-    except Exception as exc:
-        service.release_agent_run()
-        raise http_error(exc) from exc
-
-    try:
-        if request.scope.mode == "space":
-            space = await blocking_func_to_async(
-                service.get_data_space, request.scope.space_id, principal
-            )
-            selected_ids = space.get("workbook_ids") or []
-        else:
-            selected_ids = request.scope.workbook_ids if request.scope.mode == "selected" else None
-        relation_ids = selected_ids
-        relations = await blocking_func_to_async(
-            service.list_dataset_relations, principal, relation_ids
-        )
-    except Exception as exc:
-        service.release_agent_run()
-        raise http_error(exc) from exc
-
-    def generate():
-        try:
-            yield _sse({
-                "type": "session",
-                "conv_id": conv.conv_id,
-                "done": False,
-                **model_context,
-                "scope_mode": request.scope.mode,
-            })
-            events = run_multi_workbook_agent(
-                llm,
-                service,
-                owner_id=principal,
-                question=request.question,
-                catalogs=catalogs,
-                selected_workbook_ids=selected_ids,
-                history_messages=history,
-                relations=relations,
-                max_selected_sources=getattr(
-                    service.config, "multi_workbook_max_selected", 5
-                ),
-                max_queried_sources=getattr(
-                    service.config, "multi_workbook_max_queried", 3
-                ),
-                max_loops=max_loops,
-                sql_max_rows=request.max_rows,
-                budget=budget,
-            )
-            for event in events:
-                if event.get("type") == "scope.resolved":
-                    conv.set_snapshot(event.get("sources") or [])
-                elif event.get("type") in {
-                    "source.inspect",
-                    "source.query.result",
-                    "source.query.error",
-                }:
-                    conv.add_tool(
-                        str(event.get("type")),
-                        json.dumps(event, ensure_ascii=False)[:120_000],
-                        detail=event,
-                    )
-                if event.get("type") == "done":
-                    if event.get("full_answer"):
-                        conv.add_ai(event["full_answer"])
-                    event = {
-                        **event,
-                        "conv_id": conv.conv_id,
-                        "analysis_route": "agent",
-                        **model_context,
-                    }
-                yield _sse(event)
-        except Exception as exc:
-            logger.exception("multi-workbook ask failed")
-            yield _sse({
-                "type": "error",
-                "error": str(exc),
-                "done": True,
-                "analysis_route": "agent",
-                **model_context,
-            })
-        finally:
             service.release_agent_run()
 
     return StreamingResponse(
@@ -1177,8 +788,7 @@ async def list_models(
             "name": default_name,
             "label": default.get("label") or default.get("model") or "Default",
             "default": True,
-            "analysis_route": "agent",
-            "legacy_analysis_route": select_analysis_route(default)["route"],
+            "analysis_route": select_analysis_route(default)["route"],
         })
         seen.add(default_name)
         for m in service.config.llms:
@@ -1190,8 +800,7 @@ async def list_models(
                 "name": name,
                 "label": m.get("label") or m.get("model"),
                 "default": False,
-                "analysis_route": "agent",
-                "legacy_analysis_route": select_analysis_route(m)["route"],
+                "analysis_route": select_analysis_route(m)["route"],
             })
         return items
     except Exception as exc:

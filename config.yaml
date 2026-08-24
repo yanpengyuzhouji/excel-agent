@@ -289,11 +289,6 @@ excel:
       model_size_b: 30
       provider: modelscope
   agent:
-    # The global Agent is enabled by default. Set false for a reversible
-    # rollout/rollback without changing the per-workbook API contract.
-    multi_workbook_enabled: true
-    max_selected_workbooks: 5
-    max_queried_workbooks: 3
     # Large/DeepSeek 保留原有自由 ReAct 探索余量；小模型不走此链路。
     max_loops: 100
     sql_max_rows: 500
