@@ -17,7 +17,7 @@
 | POST | `/api/v1/workbooks/{wid}/versions/{v}/activate` | 版本回滚 |
 | DELETE | `/api/v1/workbooks/{wid}` | 删除工作簿（元数据 + source/draft/database/reports 全部磁盘产物） |
 | POST | `/api/v1/workbooks/{wid}/query` | 只读 SQL 查询 |
-| POST | `/api/v1/workbooks/{wid}/ask` | SSE 双路由问答：DeepSeek/30B+ 为 ReAct，30B 以下默认走规则模板；可带 `conv_id` 续接多轮 |
+| POST | `/api/v1/workbooks/{wid}/ask` | SSE 单工作簿 Agent 问答；可带 `conv_id` 续接多轮 |
 | GET | `/api/v1/workbooks/{wid}/analysis-profile` | 通用数据画像（字段质量、语义候选、候选业务域） |
 | GET | `/api/v1/workbooks/{wid}/reports/{rid}` | 获取 HTML 报告文件 |
 | GET | `/api/v1/workbooks/{wid}/reports/{rid}/pdf` | 将 HTML 报告转换为 PDF 并下载 |
@@ -93,10 +93,9 @@ curl -X POST http://127.0.0.1:8090/api/v1/workbook-imports \
 { "question": "那最大的类别呢？", "max_rows": 200, "conv_id": "abc123" }
 ```
 
-`model` 可选，匹配 `excel.llms[].name`。也可以用 `analysis_route: "large"` 或
-`analysis_route: "small"` 做受控路由覆盖。默认规则是：DeepSeek 和显式配置为
-`large` 的模型继续使用当前 ReAct；模型规模 `< 30B` 默认使用确定性的
-`profile → 标准模板 → facts/findings → 固定 HTML` 链路。
+`model` 可选，匹配 `excel.llms[].name`。`analysis_route` 旧字段仍兼容读取，但问数
+统一进入模型驱动 Agent；不会再因模型规模切换到规则模板。画像模块仍可用于目录和
+质量信号，SQLGlot、只读连接和 Authorizer 仍由服务端强制执行。
 
 每次问答都持久化到会话：用户问题（`user`，包含本轮模型元数据）、AI 回答（`ai`）、每步工具调用（`tool`，含 Action/Observation）。会话同时保存最近一次实际使用的 `model_name`、`model_label`、`model_id`、`analysis_route`、`analysis_reason` 和 `model_size_b`，因此刷新页面后仍可显示会话模型和路由。历史会话经 `GET /workbooks/{wid}/conversations` 查看。
 
@@ -116,10 +115,8 @@ curl -X POST http://127.0.0.1:8090/api/v1/workbook-imports \
 | type | 字段 | 说明 |
 |---|---|---|
 | `status` | `status` | `"thinking"` |
-| `analysis_route` | `route`, `reason`, `model_size_b`, `model_name`, `model_label`, `model_id` | 实际选用的路由和会话模型；`session`/`done` 事件均会携带 |
-| `profile` | `table_count`, `row_count`, `column_count`, `candidate_domains` | 小路由的通用数据画像摘要 |
-| `finding` | `finding_id`, `severity`, `title`, `evidence` | 可复核规则洞察 |
-| `report_spec` | `report` | 固定 HTML 渲染前的结构化报告 |
+| `analysis_route` | `route="agent"`, `reason`, `model_name`, `model_label`, `model_id` | 实际 Agent 路由和会话模型；旧 route 字段仅作兼容元数据 |
+| `profile` / `finding` / `report_spec` | 兼容字段 | 旧客户端可继续消费，默认问数不再依赖规则模板 |
 | `sql` | `sql`, `columns`, `rows`, `row_count`, `truncated` | 执行过的 SQL 与结果（`error` 字段表示失败） |
 | `table` | `columns`, `rows`, `row_count` | 供前端渲染表格 |
 | `plan.update` | `tasks[]` | ReAct 任务计划（`content`/`status`/`priority`） |
@@ -155,6 +152,23 @@ excel:
     max_loops: 100       # ReAct 最大轮次（复杂分析 + 生成 HTML 报告需要充足轮次）
     sql_max_rows: 500
 ```
+
+## 多工作簿 Agent
+
+全局入口 `POST /api/v1/agent/ask` 支持 `scope.mode=auto|selected|space`。每个来源仍
+固定到自己的 active SQLite 版本，SQL 不使用 `ATTACH`；`done` 事件包含 `sources`、
+`failed_sources` 和 `partial`。配套接口为：
+
+```text
+GET/POST/PATCH/DELETE /api/v1/data-spaces[/{space_id}]
+GET/POST/DELETE       /api/v1/dataset-relations[/{relation_id}]
+GET                   /api/v1/data-catalog/search?q=采购
+GET/DELETE            /api/v1/agent/conversations[/{conv_id}]
+```
+
+`workbook_catalog` 只保存表、字段、显示名和版本摘要；目录先按 owner 过滤，再使用
+FTS5/关键词召回。跨库行级 JOIN 必须有用户确认的 `dataset_relation`，否则只能分别
+查询或使用受控 UNION/聚合器。
 
 ## 依赖
 

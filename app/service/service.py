@@ -45,6 +45,12 @@ from ..models.conversation import (
     WorkbookConversationEntity,
     WorkbookMessageEntity,
 )
+from ..models.catalog import WorkbookCatalogDao
+from ..models.agent import (
+    DataSpaceDao,
+    DatasetRelationDao,
+)
+from ..catalog.builder import build_catalog_payload
 from .materializer import build_database as materialize_database
 from .parser import dump_draft, load_draft, parse_workbook
 
@@ -78,6 +84,9 @@ class WorkbookImportService:
         self._config = config
         self._dataset_dao = dataset_dao or WorkbookDatasetDao()
         self._import_dao = import_dao or WorkbookImportDao()
+        self._catalog_dao = WorkbookCatalogDao()
+        self._space_dao = DataSpaceDao()
+        self._relation_dao = DatasetRelationDao()
         self._import_slots = threading.BoundedSemaphore(
             int(getattr(config, "max_concurrent_imports", 2))
         )
@@ -827,6 +836,15 @@ class WorkbookImportService:
                     "active_import_id": entity.import_id,
                 },
             )
+            try:
+                self.refresh_workbook_catalog(entity.workbook_id)
+            except Exception:
+                # Catalogs accelerate multi-workbook routing but must not make
+                # an otherwise valid workbook import unavailable.
+                logger.exception(
+                    "Failed to refresh workbook catalog for %s",
+                    entity.workbook_id,
+                )
         except Exception as exc:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -891,6 +909,10 @@ class WorkbookImportService:
             workbook_id,
             {"active_version": version, "active_import_id": entity.import_id},
         )
+        try:
+            self.refresh_workbook_catalog(workbook_id)
+        except Exception:
+            logger.exception("Failed to refresh workbook catalog for %s", workbook_id)
         return ConfirmResponse(
             import_id=entity.import_id,
             workbook_id=workbook_id,
@@ -936,6 +958,7 @@ class WorkbookImportService:
             session.query(WorkbookDatasetEntity).filter(
                 WorkbookDatasetEntity.workbook_id == workbook_id
             ).delete(synchronize_session=False)
+        self._catalog_dao.delete_by_workbook_id(workbook_id)
         # Remove the workbook directory on disk (v*/ source/draft/database/reports).
         if storage_root.exists():
             try:
@@ -947,16 +970,280 @@ class WorkbookImportService:
         logger.info("Deleted workbook %s", workbook_id)
 
     def active_database_path(self, workbook_id: str) -> str:
-        dataset = self._dataset_dao.get_by_workbook_id(workbook_id)
+        return str(self.active_database_snapshot(workbook_id)["database_path"])
+
+    def active_database_snapshot(
+        self, workbook_id: str, owner_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Resolve an authorized active database into an immutable query snapshot."""
+
+        if owner_id is None:
+            # Preserve compatibility with lightweight service/DAO doubles used
+            # by the existing single-workbook SQL tests.
+            dataset = self._dataset_dao.get_by_workbook_id(workbook_id)
+        else:
+            dataset = self._dataset_for(workbook_id, owner_id=owner_id)
         if not dataset or not dataset.active_import_id:
             raise ValueError("Workbook has no active database")
-        entity = self._load_entity(dataset.active_import_id)
+        entity = self._load_entity(dataset.active_import_id, owner_id=owner_id)
+        version = int(getattr(entity, "version", 1))
         database_path = self._resolve_version_artifact_path(
-            workbook_id, entity.version, entity.database_path
+            workbook_id, version, entity.database_path
         )
         if not database_path or not database_path.exists():
             raise ValueError("Active workbook database file does not exist")
-        return str(database_path)
+        return {
+            "workbook_id": workbook_id,
+            "owner_id": getattr(dataset, "owner_id", None),
+            "display_name": getattr(dataset, "display_name", workbook_id),
+            "source_file": getattr(entity, "file_name", None),
+            "import_id": entity.import_id,
+            "version": version,
+            "source_hash": getattr(entity, "source_hash", None),
+            "database_path": str(database_path),
+        }
+
+    def refresh_workbook_catalog(self, workbook_id: str) -> Dict[str, Any]:
+        """Build and persist the metadata-only catalog for the active version."""
+
+        snapshot = self.active_database_snapshot(workbook_id)
+        built = build_catalog_payload(
+            snapshot["database_path"],
+            workbook_id=workbook_id,
+            display_name=snapshot["display_name"],
+            source_file=snapshot["source_file"],
+            import_id=snapshot["import_id"],
+            version=snapshot["version"],
+        )
+        values = {
+            "workbook_id": workbook_id,
+            "owner_id": snapshot["owner_id"],
+            "active_import_id": snapshot["import_id"],
+            "active_version": snapshot["version"],
+            "display_name": snapshot["display_name"],
+            "source_file": snapshot["source_file"],
+            "schema_digest": built["schema_digest"],
+            "catalog_text": built["catalog_text"],
+            "catalog_json": built["catalog_json"],
+            "status": "ready",
+            "error_message": None,
+        }
+        self._catalog_dao.upsert(values)
+        return {**values, "payload": built["payload"]}
+
+    def list_workbook_catalog(
+        self, owner_id: str, *, limit: int = 200, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Return only ready catalogs owned by the authenticated principal."""
+
+        # Existing installations may have active databases created before the
+        # catalog table was introduced.  Rebuild missing/stale metadata lazily;
+        # this never copies business rows into the metadata database.
+        for dataset in self._dataset_dao.list_by_owner(owner_id, limit=limit, offset=offset):
+            if not dataset.active_import_id:
+                continue
+            current = self._catalog_dao.get_by_workbook_id(
+                dataset.workbook_id, owner_id=owner_id
+            )
+            if current and current.active_import_id == dataset.active_import_id:
+                continue
+            try:
+                self.refresh_workbook_catalog(dataset.workbook_id)
+            except Exception:
+                logger.exception(
+                    "Failed to lazily build workbook catalog for %s",
+                    dataset.workbook_id,
+                )
+
+        rows = self._catalog_dao.list_by_owner(owner_id, limit=limit, offset=offset)
+        result = []
+        for row in rows:
+            try:
+                payload = json.loads(row.catalog_json or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            result.append(
+                {
+                    "workbook_id": row.workbook_id,
+                    "owner_id": row.owner_id,
+                    "active_import_id": row.active_import_id,
+                    "active_version": row.active_version,
+                    "display_name": row.display_name,
+                    "source_file": row.source_file,
+                    "schema_digest": row.schema_digest,
+                    "catalog": payload,
+                    "status": row.status,
+                    "updated_at": row.gmt_modified.isoformat()
+                    if row.gmt_modified
+                    else None,
+                }
+            )
+        return result
+
+    def search_workbook_catalog(self, owner_id: str, query: str) -> List[Dict[str, Any]]:
+        """Return ranked metadata candidates without ever crossing owner scope.
+
+        The catalog is deliberately small and metadata-only.  A bounded
+        keyword fallback keeps this endpoint available on older SQLite builds;
+        it can later be replaced by FTS/embedding retrieval without changing
+        the authorization contract.
+        """
+
+        rows = self.list_workbook_catalog(owner_id, limit=200)
+        terms = [
+            item.casefold()
+            for item in re.findall(r"[a-z0-9_]+|[\u3400-\u9fff]{2,}", str(query or "").casefold())
+        ]
+        if not terms:
+            return rows[:20]
+        # Prefer the owner-filtered FTS5 index when available, while keeping
+        # the bounded scorer as a deterministic compatibility fallback.
+        try:
+            fts_rows = self._catalog_dao.search_by_owner(owner_id, query, limit=20)
+            if fts_rows:
+                by_id = {item.get("workbook_id"): item for item in rows}
+                ordered = [by_id[row.workbook_id] for row in fts_rows if row.workbook_id in by_id]
+                if ordered:
+                    return ordered
+        except Exception:
+            logger.exception("Catalog FTS search failed; using keyword fallback")
+        ranked = []
+        for row in rows:
+            catalog = row.get("catalog") or {}
+            haystack = " ".join(
+                [
+                    str(row.get("display_name") or ""),
+                    str(row.get("source_file") or ""),
+                    json.dumps(catalog, ensure_ascii=False),
+                ]
+            ).casefold()
+            score = sum(3 for term in terms if term in haystack)
+            if str(query or "").casefold() in haystack:
+                score += 5
+            ranked.append((score, row))
+        ranked.sort(key=lambda item: (-item[0], str(item[1].get("display_name") or "")))
+        return [row for _score, row in ranked[:20]]
+
+    # ---------------------------------------------------------- global scopes
+
+    def create_data_space(
+        self,
+        owner_id: str,
+        name: str,
+        description: str,
+        workbook_ids: List[str],
+    ) -> Dict[str, Any]:
+        if not str(name or "").strip():
+            raise ValueError("Data space name is required")
+        workbook_ids = list(dict.fromkeys(str(item) for item in workbook_ids))
+        if len(workbook_ids) > 100:
+            raise ValueError("A data space may contain at most 100 workbooks")
+        for workbook_id in workbook_ids:
+            self._dataset_for(workbook_id, owner_id=owner_id)
+        space_id = uuid.uuid4().hex
+        entity = self._space_dao.create(
+            {
+                "space_id": space_id,
+                "owner_id": owner_id,
+                "name": str(name).strip()[:512],
+                "description": str(description or "")[:4000],
+            }
+        )
+        self._space_dao.replace_members(space_id, workbook_ids)
+        return self.get_data_space(space_id, owner_id)
+
+    def list_data_spaces(self, owner_id: str) -> List[Dict[str, Any]]:
+        return [self._data_space_dict(row) for row in self._space_dao.list(owner_id)]
+
+    def get_data_space(self, space_id: str, owner_id: str) -> Dict[str, Any]:
+        entity = self._space_dao.get(space_id, owner_id)
+        if not entity:
+            raise ValueError("Data space not found")
+        return self._data_space_dict(entity)
+
+    def update_data_space(
+        self,
+        space_id: str,
+        owner_id: str,
+        name: str,
+        description: str,
+        workbook_ids: List[str],
+    ) -> Dict[str, Any]:
+        if not str(name or "").strip():
+            raise ValueError("Data space name is required")
+        workbook_ids = list(dict.fromkeys(str(item) for item in workbook_ids))
+        for workbook_id in workbook_ids:
+            self._dataset_for(workbook_id, owner_id=owner_id)
+        if not self._space_dao.update(
+            space_id,
+            owner_id,
+            {"name": str(name).strip()[:512], "description": str(description or "")[:4000]},
+        ):
+            raise ValueError("Data space not found")
+        self._space_dao.replace_members(space_id, workbook_ids)
+        return self.get_data_space(space_id, owner_id)
+
+    def delete_data_space(self, space_id: str, owner_id: str) -> None:
+        if not self._space_dao.delete(space_id, owner_id):
+            raise ValueError("Data space not found")
+
+    @staticmethod
+    def _data_space_dict(entity: Any) -> Dict[str, Any]:
+        # Members are loaded separately so this remains compatible with the
+        # detached SQLAlchemy entity returned by the owner-scoped DAO.
+        dao = DataSpaceDao()
+        return {
+            "space_id": entity.space_id,
+            "owner_id": entity.owner_id,
+            "name": entity.name,
+            "description": entity.description,
+            "workbook_ids": dao.list_workbook_ids(entity.space_id),
+            "created_at": entity.gmt_created.isoformat() if entity.gmt_created else None,
+            "updated_at": entity.gmt_modified.isoformat() if entity.gmt_modified else None,
+        }
+
+    def list_dataset_relations(
+        self, owner_id: str, workbook_ids: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        return [self._relation_dict(row) for row in self._relation_dao.list(owner_id, workbook_ids)]
+
+    def create_dataset_relation(self, owner_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        for key in ("left_workbook_id", "right_workbook_id"):
+            self._dataset_for(str(values.get(key) or ""), owner_id=owner_id)
+        relation_id = uuid.uuid4().hex
+        values = {
+            **values,
+            "relation_id": relation_id,
+            "owner_id": owner_id,
+            "left_workbook_id": str(values["left_workbook_id"]),
+            "right_workbook_id": str(values["right_workbook_id"]),
+            "relation_type": str(values.get("relation_type") or "equality"),
+            "enabled": 1,
+            "confirmed_by": owner_id,
+        }
+        entity = self._relation_dao.create(values)
+        return self._relation_dict(entity)
+
+    def delete_dataset_relation(self, owner_id: str, relation_id: str) -> None:
+        if not self._relation_dao.delete(relation_id, owner_id):
+            raise ValueError("Dataset relation not found")
+
+    @staticmethod
+    def _relation_dict(entity: Any) -> Dict[str, Any]:
+        return {
+            "relation_id": entity.relation_id,
+            "owner_id": entity.owner_id,
+            "left_workbook_id": entity.left_workbook_id,
+            "left_table": entity.left_table,
+            "left_column": entity.left_column,
+            "right_workbook_id": entity.right_workbook_id,
+            "right_table": entity.right_table,
+            "right_column": entity.right_column,
+            "relation_type": entity.relation_type,
+            "cardinality": entity.cardinality,
+            "enabled": bool(entity.enabled),
+            "confirmed_by": entity.confirmed_by,
+        }
 
     def execute_readonly_sql(
         self,
@@ -964,18 +1251,31 @@ class WorkbookImportService:
         sql: str,
         max_rows: int = 500,
     ) -> SQLQueryResponse:
+        """Query the current active version of one workbook."""
+
+        return self.execute_readonly_sql_snapshot(
+            self.active_database_snapshot(workbook_id), sql, max_rows=max_rows
+        )
+
+    def execute_readonly_sql_snapshot(
+        self,
+        snapshot: Dict[str, Any],
+        sql: str,
+        max_rows: int = 500,
+    ) -> SQLQueryResponse:
+        """Query a server-created, version-pinned workbook snapshot.
+
+        The snapshot is never accepted directly from an API request.  It is
+        created after owner validation and keeps multi-workbook turns from
+        drifting when an active version changes mid-request.
+        """
+
+        database_path = Path(str(snapshot.get("database_path") or ""))
+        if not database_path.exists():
+            raise ValueError("Pinned workbook database file does not exist")
         if not self._sql_slots.acquire(blocking=False):
             raise ResourceBusyError("SQL concurrency limit reached; retry later")
         try:
-            dataset = self._dataset_dao.get_by_workbook_id(workbook_id)
-            if not dataset or not dataset.active_import_id:
-                raise ValueError("Workbook has no active database")
-            entity = self._load_entity(dataset.active_import_id)
-            database_path = self._resolve_version_artifact_path(
-                workbook_id, getattr(entity, "version", 1), entity.database_path
-            )
-            if not database_path or not database_path.exists():
-                raise ValueError("Active workbook database file does not exist")
             self._validate_readonly_sql(sql)
             configured_rows = int(getattr(self._config, "query_row_limit", 500))
             max_rows = min(max(int(max_rows), 1), configured_rows)

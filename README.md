@@ -82,7 +82,12 @@ excel:
 | POST | `/api/v1/workbooks/{wid}/versions/{v}/activate` | 版本回滚 |
 | DELETE | `/api/v1/workbooks/{wid}` | 删除工作簿(元数据+所有磁盘产物) |
 | POST | `/api/v1/workbooks/{wid}/query` | 只读 SQL 查询(SELECT 仅限,authorizer+sqlglot 双重防护) |
-| POST | `/api/v1/workbooks/{wid}/ask` | SSE 双路由问答：DeepSeek/30B+ 保留 ReAct，自 30B 以下模型默认走规则模板报告；可带 `conv_id` 续接多轮 |
+| POST | `/api/v1/workbooks/{wid}/ask` | SSE 单工作簿 Agent 问答（旧 `analysis_route` 参数兼容读取）；可带 `conv_id` 续接多轮 |
+| POST | `/api/v1/agent/ask` | SSE 多工作簿 Agent：自动选库、指定工作簿或数据空间，逐库只读查询并返回来源 |
+| GET | `/api/v1/data-catalog/search?q=...` | owner-scoped 目录搜索（FTS5/关键词回退） |
+| GET/POST/PATCH/DELETE | `/api/v1/data-spaces[/{space_id}]` | 创建和维护工作簿数据空间 |
+| GET/POST/DELETE | `/api/v1/dataset-relations[/{relation_id}]` | 管理已确认的跨工作簿字段关系 |
+| GET/DELETE | `/api/v1/agent/conversations[/{conv_id}]` | 全局 Agent 会话与来源快照 |
 | GET | `/api/v1/workbooks/{wid}/analysis-profile` | 获取通用数据画像、字段质量与候选业务域 |
 | GET | `/api/v1/workbooks/{wid}/reports/{rid}` | 获取 HTML 报告文件 |
 | GET | `/api/v1/workbooks/{wid}/reports/{rid}/pdf` | 将 HTML 报告转换为 PDF 并下载 |
@@ -95,7 +100,7 @@ excel:
 
 ```
 data: {"type":"status","status":"thinking","done":false}
-data: {"type":"analysis_route","route":"small|large","reason":"..."}
+data: {"type":"analysis_route","route":"agent","reason":"agent-only ..."}
 data: {"type":"sql","sql":"...","columns":[...],"rows":[...],"row_count":N,"truncated":false}
 data: {"type":"table","columns":[...],"rows":[...],"row_count":N}
 data: {"type":"profile","table_count":N,"row_count":N,"column_count":N}
@@ -119,7 +124,7 @@ RongNengRAG 通过 `src/api/excel_proxy.py` 把 `/excel/*` 反向代理到本服
 - **防护阈值**: `max_import_bytes`(200MB) / `max_import_rows`(30万),超限报明确错误而非 OOM。
 - **多用户**: 已移除(所有用户共用一套存储,服务仅绑 127.0.0.1)。
 - **安全**: 只读 SQL 双保险(sqlite authorizer + sqlglot AST 只允许单条 SELECT);ReAct 仅 4 个白名单工具,无任意代码执行。
-- **双路由**: `excel.llm/llms` 可用 `analysis_route: large|small` 显式配置；未配置时 DeepSeek 和 30B+ 走原 ReAct，自 30B 以下或未知规模模型走通用 profile/模板/facts/findings/固定 HTML 链路。小路由不让模型自由生成 SQL/CSS。
+- **统一 Agent**: 单工作簿和多工作簿问数都走模型驱动 Agent；旧 `analysis_route` 保留为兼容诊断字段，画像/模板仅作为回归工具，不作为默认答案路线。
 - **与 DB-GPT 的有意裁剪**: 未移植 `code_interpreter` / `shell_interpreter`(任意代码执行是安全与复杂度黑洞;本链路聚合用 SQL `GROUP BY/COUNT/SUM` 表达)。若未来需要,可在 `agent/tools.py` 增补并重新加入 `workflow_prompt` 工具清单。
 - **Windows**: sqlite file URI 使用 `.as_posix()` 规避反斜杠问题。
 - **跨环境恢复**: 若元数据库保留了 Windows 绝对路径、但服务在 WSL/Linux 启动，会按当前存储根和版本目录自动解析 `source/draft/database` 产物。

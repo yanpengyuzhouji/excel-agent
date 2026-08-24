@@ -167,6 +167,20 @@
   .answer-block { background:#fff; border:1px solid var(--border); border-radius:8px; padding:12px; }
   .answer-block .lb { font-size:11px; font-weight:600; color:#909399; margin-bottom:4px; }
   .btn.copy { float:right; }
+  /* Global multi-workbook Agent view */
+  .global-agent { display:flex; flex-direction:column; gap:10px; height:100%; min-height:0; }
+  .global-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; padding:10px; background:#17232b; color:#f8f5ed; border-radius:8px; }
+  .global-toolbar label { color:#b8c5c5; font-size:12px; }
+  .global-toolbar select,.global-toolbar input { border:1px solid #486367; border-radius:5px; padding:5px 7px; background:#22343a; color:#fff; }
+  .global-sources { display:flex; gap:6px; flex-wrap:wrap; padding:8px; border:1px solid var(--border); border-radius:7px; background:#fbfcfe; }
+  .global-source { display:flex; gap:5px; align-items:center; padding:4px 7px; border:1px solid #d7ebe8; border-radius:5px; font-size:12px; }
+  .global-log { flex:1; min-height:120px; overflow:auto; padding:10px; border:1px solid var(--border); border-radius:7px; background:#fbfcfe; }
+  .global-event { margin:5px 0; font-size:12px; }
+  .global-event.source { color:#0b7a70; }
+  .global-event.error { color:#b42318; }
+  .global-answer { margin-top:8px; padding:12px; border-radius:7px; background:#e8f7f5; white-space:pre-wrap; }
+  .global-composer { display:flex; gap:8px; }
+  .global-composer input { flex:1; border:1px solid var(--border); border-radius:5px; padding:9px 12px; font-size:14px; }
   @media (max-width:1000px) {
     .qa-context { grid-template-columns:1fr 1fr; }
     .qa-context-card.findings-card { grid-column:1 / -1; }
@@ -189,6 +203,7 @@
     <div class="panel-head">
       <span>📚 我的 Excel 库</span>
       <span class="bar">
+        <button class="btn small" id="globalAgentBtn">✨ 智能问数</button>
         <input type="file" id="fileInput" accept=".xlsx,.xlsm,.csv" style="display:none">
         <button class="btn primary small" id="uploadBtn">＋ 上传</button>
       </span>
@@ -211,6 +226,7 @@ const ACTIVE_IMPORT_KEY = 'excel-active-import';
 
 // ---------- shared state ----------
 const state = { imports: [], selected: null, view: 'list' };
+const globalAgent = { catalogs: [], spaces: [], conversations: [], loaded: false, busy: false, answer: '' };
 const $ = (sel) => document.querySelector(sel);
 
 // ---------- API helpers ----------
@@ -1469,10 +1485,151 @@ function renderResultTable(ev) {
     ${ev.rows.map((r) => `<tr>${r.map((v) => `<td>${esc(v === null ? '' : v)}</td>`).join('')}</tr>`).join('')}</table>`;
 }
 
+// ---------- global multi-workbook Agent ----------
+async function loadGlobalAgentMeta() {
+  try {
+    const [catalogs, spaces, conversations] = await Promise.all([
+      api('/data-catalog'), api('/data-spaces'), api('/agent/conversations'),
+    ]);
+    globalAgent.catalogs = catalogs || [];
+    globalAgent.spaces = spaces || [];
+    globalAgent.conversations = conversations || [];
+    globalAgent.loaded = true;
+    if (state.view === 'agent') renderGlobalAgent();
+  } catch (e) {
+    globalAgent.loaded = true;
+    const log = $('#globalLog');
+    if (log) log.innerHTML = `<div class="err">目录加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+function globalScopePayload() {
+  const mode = $('#globalScope')?.value || 'auto';
+  const payload = { mode };
+  if (mode === 'space') payload.space_id = $('#globalSpace')?.value || '';
+  if (mode === 'selected') {
+    payload.workbook_ids = Array.from(document.querySelectorAll('#globalSources input:checked'))
+      .map((el) => el.value);
+  }
+  return payload;
+}
+
+function globalLog(message, cls = '') {
+  const log = $('#globalLog');
+  if (!log) return;
+  const row = document.createElement('div');
+  row.className = `global-event ${cls}`;
+  row.textContent = message;
+  log.appendChild(row);
+  log.scrollTop = log.scrollHeight;
+}
+
+function handleGlobalAgentEvent(ev) {
+  if (ev.type === 'session') {
+    globalAgent.busy = true;
+    if (ev.conv_id) {
+      const sel = $('#globalConversation');
+      if (sel) sel.value = ev.conv_id;
+    }
+    globalLog(`会话已建立 · ${ev.model_label || ev.model_name || 'Agent'}`, 'source');
+  } else if (ev.type === 'scope.resolved') {
+    const sources = (ev.sources || []).map((s) => `${s.display_name || s.workbook_id} v${s.version}`);
+    globalLog(`作用域已锁定：${sources.join('、') || '无数据源'}`, 'source');
+  } else if (ev.type === 'catalog.candidates') {
+    globalLog(`目录候选 ${(ev.candidates || []).length} 个`, 'source');
+  } else if (ev.type === 'source.inspect') {
+    globalLog(`已读取 ${ev.source?.display_name || ev.source?.workbook_id} 的 schema 与样本`, 'source');
+  } else if (ev.type === 'source.query.result') {
+    globalLog(`查询完成：${ev.source?.display_name || ev.source?.workbook_id} · ${ev.row_count || 0} 行`, 'source');
+  } else if (ev.type === 'source.query.error') {
+    globalLog(`部分失败：${ev.source?.display_name || ev.source?.workbook_id} · ${ev.error || ''}`, 'error');
+  } else if (ev.type === 'aggregate.result') {
+    globalLog(`已按 ${ev.operation || '结果'} 汇总 ${(ev.row_count || 0)} 行`, 'source');
+  } else if (ev.type === 'status') {
+    globalLog(`Agent 第 ${ev.round || ''} 轮分析中…`);
+  } else if (ev.type === 'done') {
+    globalAgent.busy = false;
+    globalAgent.answer = ev.full_answer || '';
+    const answer = $('#globalAnswer');
+    const partial = ev.partial ? ' · 部分来源失败' : '';
+    if (answer) answer.innerHTML = `<div class="lb">✅ 回答 · 本次使用 ${(ev.sources || []).length} 个数据源${partial}</div>${esc(globalAgent.answer)}`;
+  } else if (ev.type === 'error') {
+    globalAgent.busy = false;
+    globalLog(`请求失败：${ev.error || '未知错误'}`, 'error');
+  }
+}
+
+async function doGlobalAsk() {
+  const input = $('#globalInput');
+  const question = input?.value.trim();
+  if (!question || globalAgent.busy) return;
+  const scope = globalScopePayload();
+  if (scope.mode === 'space' && !scope.space_id) return alert('请选择数据空间');
+  if (scope.mode === 'selected' && !scope.workbook_ids.length) return alert('至少选择一个工作簿');
+  input.value = '';
+  const log = $('#globalLog'); if (log) log.innerHTML = '';
+  const answer = $('#globalAnswer'); if (answer) answer.innerHTML = '';
+  globalLog(`提问：${question}`);
+  globalAgent.busy = true;
+  const payload = { question, scope, max_rows: 500 };
+  const conv = $('#globalConversation')?.value;
+  if (conv) payload.conv_id = conv;
+  try {
+    const resp = await fetch(`${API}/agent/ask`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+    const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    const dispatch = (line) => {
+      if (!line.startsWith('data: ')) return;
+      try { handleGlobalAgentEvent(JSON.parse(line.slice(6))); } catch (e) { globalLog(`事件解析失败：${e.message}`, 'error'); }
+    };
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split(/\r?\n/); buf = lines.pop() || ''; lines.forEach(dispatch);
+    }
+    buf += dec.decode(); buf.split(/\r?\n/).forEach(dispatch);
+  } catch (e) {
+    globalAgent.busy = false; globalLog(e.message, 'error');
+  }
+}
+
+function renderGlobalAgent() {
+  $('#mainTitle').textContent = '✨ 智能多工作簿问数';
+  const body = $('#mainBody'); body.className = 'body';
+  const selectedId = state.selected?.workbook_id || '';
+  const spaces = globalAgent.spaces || [];
+  const catalogs = globalAgent.catalogs || [];
+  body.innerHTML = `<div class="global-agent">
+    <div class="global-toolbar">
+      <label>数据范围</label><select id="globalScope">
+        <option value="auto">自动从我的工作簿选择</option>
+        <option value="selected">锁定指定工作簿</option>
+        <option value="space">数据空间</option>
+      </select>
+      <select id="globalSpace"><option value="">选择数据空间</option>${spaces.map((s) => `<option value="${esc(s.space_id)}">${esc(s.name)} (${(s.workbook_ids || []).length})</option>`).join('')}</select>
+      <select id="globalConversation"><option value="">新会话</option>${(globalAgent.conversations || []).map((c) => `<option value="${esc(c.conv_id)}">${esc(c.title || c.conv_id.slice(0, 8))}</option>`).join('')}</select>
+      <span class="muted" style="color:#b8c5c5">每个工作簿仍独立只读查询</span>
+    </div>
+    <div class="global-sources" id="globalSources">${catalogs.length ? catalogs.map((c) => `<label class="global-source"><input type="checkbox" value="${esc(c.workbook_id)}" ${c.workbook_id === selectedId ? 'checked' : ''}>${esc(c.display_name || c.workbook_id)} <span class="muted">v${esc(c.active_version)}</span></label>`).join('') : '<span class="muted">暂无已激活工作簿目录</span>'}</div>
+    <div class="global-log" id="globalLog"><div class="muted">选择范围后开始提问，Agent 会展示选库、schema、SQL 与来源。</div></div>
+    <div class="answer-block global-answer" id="globalAnswer">${globalAgent.answer ? `<div class="lb">✅ 回答</div>${esc(globalAgent.answer)}` : '<span class="muted">回答将在这里显示</span>'}</div>
+    <div class="global-composer"><input id="globalInput" placeholder="例如：比较各采购目录的供应商和采购数量" ${globalAgent.busy ? 'disabled' : ''}><button class="btn primary" id="globalAskBtn" ${globalAgent.busy ? 'disabled' : ''}>发送</button></div>
+  </div>`;
+  const scope = $('#globalScope'); const space = $('#globalSpace');
+  const syncScope = () => { space.style.display = scope.value === 'space' ? '' : 'none'; document.querySelector('#globalSources').style.display = scope.value === 'selected' ? 'flex' : 'none'; };
+  scope.onchange = syncScope; syncScope();
+  $('#globalAskBtn').onclick = doGlobalAsk;
+  $('#globalInput').onkeydown = (e) => { if (e.key === 'Enter') doGlobalAsk(); };
+  if (!globalAgent.loaded) loadGlobalAgentMeta();
+}
+
 // ---------- main dispatch ----------
 function renderMain() {
   if (state.view === 'review') renderReview();
   else if (state.view === 'qa') renderQA();
+  else if (state.view === 'agent') renderGlobalAgent();
   else {
     $('#mainTitle').textContent = '请选择或上传一个工作簿';
     const body = $('#mainBody'); body.className = 'body'; body.innerHTML = '';
@@ -1485,6 +1642,7 @@ function esc(s) {
 
 // ---------- init ----------
 $('#uploadBtn').onclick = () => $('#fileInput').click();
+$('#globalAgentBtn').onclick = () => { state.view = 'agent'; renderMain(); };
 $('#fileInput').onchange = () => {
   const f = $('#fileInput').files[0];
   if (f) doUpload(f).catch((e) => alert(e.message));
