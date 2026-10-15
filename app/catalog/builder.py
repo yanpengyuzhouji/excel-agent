@@ -124,7 +124,7 @@ def build_catalog_payload(
                 {
                     "table_name": table_name,
                     "display_name": _text(
-                        manifest_table.get("sheet") or table_name, 300
+                        ' · '.join(str(v) for v in [manifest_table.get('sheet'), manifest_table.get('region_title')] if v) or table_name, 300
                     ),
                     "row_count": row_count,
                     "columns": columns,

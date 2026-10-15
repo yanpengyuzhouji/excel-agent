@@ -63,14 +63,15 @@ class ParserIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '可靠|解析'):
                 self.parse_rows([['项目','金额'],['甲',10],['乙',20]])
 
-    def test_multilevel_and_separated_tables_require_restructuring(self):
+    def test_verified_multilevel_passes_but_unclassified_separated_tables_do_not(self):
         from app.service.service import WorkbookImportService
         def configure(sheet):
             sheet.merge_cells('A1:A2')
             sheet.merge_cells('B1:C1')
         draft = self.parse_rows([['项目','投资',None],[None,'计划','实际']]+[[f'P{i}',i,i] for i in range(6)],configure)
         codes = [i['code'] for i in WorkbookImportService._validate_draft(draft)['errors']]
-        self.assertIn('UNVERIFIED_HEADER_STRUCTURE',codes)
+        self.assertEqual([],codes)
+        self.assertEqual(['项目','投资_计划','投资_实际'],[c['display_name'] for c in draft['sheets'][0]['columns']])
         draft = self.parse_rows([['项目','金额']]+[[f'P{i}',i] for i in range(6)]+[[],['日期','数量']]+[['2026-01-01',2]]*6)
         self.assertIn('MULTIPLE_TABLE_REGIONS',[i['code'] for i in WorkbookImportService._validate_draft(draft)['errors']])
 

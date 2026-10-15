@@ -114,7 +114,7 @@ def _validate_source(sheet, selected_columns, facts):
     if any(type(r) is not int or r < 1 for r in source_rows) or len(set(source_rows)) != len(source_rows):
         raise ValueError("Invalid or duplicate source row")
     letters = [column.get("source_column") or _column_letter(index + 1)
-               for index, column in selected_columns]
+               for index, column in selected_columns if not column.get('derived')]
     if len(set(letters)) != len(letters):
         raise ValueError("Duplicate enabled source column")
     classifications = sheet.get('source_classifications')
@@ -133,13 +133,20 @@ def _validate_source(sheet, selected_columns, facts):
             letter = column.get("source_column") or _column_letter(index + 1)
             coordinate = f"{letter}{row['source_row']}"
             edited = row.get("edited_columns", [])
-            if any(key in edited for key in
+            if not column.get('derived') and any(key in edited for key in
                    (column.get("column_id"), letter, column["physical_name"]) if key is not None):
                 continue
             fact = facts.get(coordinate)
             if fact is None:
                 raise ValueError(f"Missing source fact: {coordinate}")
             original = fact.get("value", fact.get("raw_value"))
+            if column.get('derived'):
+                from .structured_layout import metric_derived
+                expected = metric_derived(original, column['derived'])
+                actual = row['values'][index] if index < len(row['values']) else None
+                if actual != expected:
+                    raise ValueError(f'Derived value mismatch: {coordinate}')
+                continue
             merge = sheet.get("merge_lineage", {}).get(coordinate)
             if merge and merge.get("source_cell") != coordinate:
                 if original not in (None, ""):
@@ -187,6 +194,8 @@ def build_database(
 ) -> None:
     """Build a complete database or raise without leaving a committed partial DB."""
 
+    from .structured_layout import validate_region_coverage
+    validate_region_coverage(draft)
     connection = sqlite3.connect(database_path)
     try:
         connection.execute("PRAGMA journal_mode=DELETE")
@@ -328,6 +337,9 @@ def build_database(
             schema_manifest.append(
                 {
                     "sheet": sheet["name"],
+                    "region_title": sheet.get('region_title'),
+                    "region_range": sheet.get('region_range'),
+                    "layout_kind": sheet.get('layout_kind'),
                     "table_name": table_name,
                     "columns": [
                         dict(column, **({"numeric_precision_note":
@@ -342,7 +354,7 @@ def build_database(
                     "parser": draft.get("parser", {}),
                     "source_record_count": sheet.get("source_record_count", len(insert_rows) + len(sheet.get("excluded_rows", []))),
                     "excluded_row_count": len(sheet.get("excluded_rows", [])),
-                    "ingestion_notes": sheet.get("issues", []) + [
+                    "ingestion_notes": sheet.get("issues", []) + sheet.get('quality_notes',[]) + [
                         note for note in (draft.get('validation') or {}).get('warnings',[])
                         if note.get('sheet_id') == sheet.get('sheet_id')],
                     "conversion_schema": [

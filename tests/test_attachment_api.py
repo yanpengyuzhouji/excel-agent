@@ -12,6 +12,19 @@ from app.main import app
 
 
 class AttachmentApiTests(unittest.TestCase):
+    def test_partitioned_summary_is_automatically_ready_and_queryable(self):
+        item=self.upload_rows([['=== 概览 ==='],['总文件数','1,234'],[],
+                               ['=== 后缀分布 ==='],['后缀','数量'],['.pdf',1200],['.xlsx',34]])
+        self.assertEqual('ready',item['status'],item)
+        self.assertEqual([],item.get('severe_warnings',[]))
+        catalog=next(c for c in self.client.get('/api/v1/data-catalog').json() if c['workbook_id']==item['workbook_id'])
+        tables=catalog['catalog']['tables']
+        self.assertEqual([1,2],[t['row_count'] for t in tables])
+        result=self.client.post(f"/api/v1/workbooks/{item['workbook_id']}/query",json={
+            'sql':f'SELECT metric,numeric_value,_source_row FROM "{tables[0]["table_name"]}"'})
+        self.assertEqual(200,result.status_code,result.text)
+        self.assertEqual([['总文件数',1234.0,2]],result.json()['rows'])
+
     def upload_rows(self, rows):
         book = Workbook()
         for row in rows:

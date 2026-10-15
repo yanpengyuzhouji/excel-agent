@@ -96,6 +96,12 @@ Respect unit_hint and number_formats. Percentages are underlying ratios; do not
 guess or rescale currency units. SQLite REAL aggregates are approximate, not
 audit-grade decimal arithmetic. Excluded summary/note/header rows are not business
 records; state that scope when relevant.
+  A worksheet may contain several independent logical tables. Their display names
+  include region titles. Do not add summary metrics to detail records or join
+  different regions by row position. Metric tables retain value_raw; numeric_value
+  is queryable, percentages are ratios, and unit preserves the original unit.
+  SOURCE_SUMMARY_MISMATCH notes describe conflicting source values: cite both
+  scopes when relevant instead of silently selecting or correcting one.
 
 Available actions:
 Action: observe_execution

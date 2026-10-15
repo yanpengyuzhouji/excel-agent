@@ -570,6 +570,8 @@ class WorkbookImportService:
                 header_row != int(sheet.get("header_row") or 0)
                 or data_start_row != int(sheet.get("data_start_row") or 0)
             ):
+                if sheet.get('region_range'):
+                    raise ValueError('已验证的逻辑表区不支持单行表头覆盖；请重新上传源文件以重新识别结构。')
                 structural_overrides[sheet["sheet_id"]] = {
                     "header_row": header_row,
                     "data_start_row": data_start_row,
@@ -685,6 +687,11 @@ class WorkbookImportService:
     def _validate_draft(draft: Dict[str, Any]) -> Dict[str, Any]:
         errors: List[Dict[str, Any]] = []
         warnings: List[Dict[str, Any]] = []
+        from .structured_layout import validate_region_coverage
+        try:
+            validate_region_coverage(draft)
+        except ValueError as exc:
+            errors.append({'code':'SOURCE_REGION_COVERAGE','level':'error','message':str(exc)})
         if (draft.get('parser') or {}).get('fallback'):
             errors.append({'code':'UNVERIFIED_PARSER','level':'error',
                 'message':'草稿来自未验证的回退读取器，请用标准解析器重新导入。'})

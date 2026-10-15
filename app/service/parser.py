@@ -70,6 +70,18 @@ def _is_empty(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _excluded_row_reason(values, normalized_header):
+    if [normalize_label(v) for v in values] == normalized_header:
+        return 'repeated_header'
+    filled = [v for v in values if not _is_empty(v)]
+    first = str(filled[0]).strip() if filled else ''
+    if re.fullmatch(r'(?:合计|总计|小计|累计|本页小计)[:：]?', first):
+        return 'summary'
+    if re.match(r'^(?:备注|说明)[:：]', first) and all(v == filled[0] for v in filled):
+        return 'note'
+    return None
+
+
 def _serializable(value: Any) -> Any:
     if _is_empty(value):
         return None
@@ -894,11 +906,20 @@ def _build_draft(
     sheets: List[Dict[str, Any]] = []
     workbook_metadata: List[Dict[str, Any]] = []
     sheet_overrides = sheet_overrides or {}
+    source_layouts = []
     for sheet_index, parsed in enumerate(parsed_sheets):
         name, rows, merged, hidden_rows, hidden_columns, formulas = parsed[:6]
         cell_facts = parsed[6] if len(parsed)>6 else {}
         sheet_id = f"sheet_{sheet_index + 1}"
         override = sheet_overrides.get(sheet_id) or sheet_overrides.get(name)
+        if not override:
+            from .structured_layout import parse_structured_sheet
+            regions = parse_structured_sheet(parsed, sheet_id, f'table_{sheet_index+1}')
+            if regions:
+                source_layouts.append({'sheet_name':name,'cells':sorted(cell_facts),
+                                       'region_ids':[r['sheet_id'] for r in regions]})
+                sheets.extend(regions)
+                continue
         if not rows:
             if override:
                 raise ValueError(f"Cannot set a header on empty sheet: {name}")
@@ -1011,20 +1032,13 @@ def _build_draft(
                     any(f'{_column_letter(c)}{source_row}' in cell_facts for c in range(1,last_col+1))):
                 source_record_count += 1
                 source_classifications[str(source_row)]='data'
-                reason = None
-                if [normalize_label(v) for v in effective] == normalized_header:
-                    reason = 'repeated_header'
+                reason = _excluded_row_reason(effective, normalized_header)
                 filled = [v for v in effective if not _is_empty(v)]
-                first = str(filled[0]).strip() if filled else ''
                 if (reason != 'repeated_header' and source_row > data_start_index+1
                         and not any(not _is_empty(v) for v in rows[source_row-2])
                         and sum(normalize_label(v) in field_words for v in filled) >= 2):
                     issues.append({'code':'MULTIPLE_TABLE_REGIONS','level':'error',
                         'message':f'{name} 第 {source_row} 行疑似开始另一张表；请拆分后导入。'})
-                if reason is None and re.fullmatch(r'(?:合计|总计|小计|累计|本页小计)[:：]?',first):
-                    reason = 'summary'
-                if reason is None and re.match(r'^(?:备注|说明)[:：]',first) and all(v == filled[0] for v in filled):
-                    reason = 'note'
                 if reason:
                     source_classifications[str(source_row)] = reason
                     excluded_rows.append({'source_row':source_row,'reason':reason,'values':raw_values})
@@ -1159,6 +1173,7 @@ def _build_draft(
         "file_name": file_name,
         "sheets": sheets,
         "metadata": workbook_metadata,
+        "source_layouts": source_layouts,
     }
 
 
