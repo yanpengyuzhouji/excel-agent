@@ -67,7 +67,7 @@ def _summary_sheets(draft: Dict[str, Any]) -> List[Dict[str, Any]]:
     result = []
     for sheet in draft.get("sheets", []):
         result.append(
-            {k: v for k, v in sheet.items() if k not in {"rows", "merge_lineage"}}
+            {k: v for k, v in sheet.items() if k not in {"rows", "merge_lineage", 'cells', 'excluded_rows', 'source_classifications'}}
         )
     return result
 
@@ -685,6 +685,16 @@ class WorkbookImportService:
     def _validate_draft(draft: Dict[str, Any]) -> Dict[str, Any]:
         errors: List[Dict[str, Any]] = []
         warnings: List[Dict[str, Any]] = []
+        if (draft.get('parser') or {}).get('fallback'):
+            errors.append({'code':'UNVERIFIED_PARSER','level':'error',
+                'message':'草稿来自未验证的回退读取器，请用标准解析器重新导入。'})
+        for sheet in draft.get('sheets',[]):
+            if sheet.get('enabled'):
+                for issue in sheet.get('issues',[]):
+                    (errors if issue.get('level') == 'error' else warnings).append(dict(issue,sheet_id=sheet['sheet_id']))
+            if sheet.get('enabled') and sheet.get('kind') == 'metadata' and sheet.get('row_count') and not sheet.get('metadata'):
+                warnings.append({'code':'UNPARSED_LAYOUT','level':'warning','sheet_id':sheet['sheet_id'],
+                    'message':f"{sheet.get('name','')} 的非空内容未识别为业务表；请确认它不是需要统计的明细。"})
         data_sheets = [
             sheet
             for sheet in draft.get("sheets", [])
@@ -701,6 +711,9 @@ class WorkbookImportService:
         table_names: set[str] = set()
         for sheet in data_sheets:
             sheet_id = sheet["sheet_id"]
+            if sheet.get('excluded_rows'):
+                warnings.append({'code':'NONBUSINESS_ROWS','level':'warning','sheet_id':sheet_id,
+                    'count':len(sheet['excluded_rows']), 'message':'已将重复表头、汇总或备注行单独留痕，不作为业务明细；请确认统计口径。'})
             table_name = sheet.get("table_name", "")
             try:
                 _quote_identifier(table_name)
@@ -799,6 +812,13 @@ class WorkbookImportService:
                     }
                 )
             if sheet.get("formulas"):
+                missing = sum(f.get('cached_value') is None for f in sheet['formulas'].values())
+                if missing:
+                    warnings.append({'code':'FORMULA_CACHE_MISSING','level':'warning','sheet_id':sheet_id,
+                        'count':missing,'message':'公式缺少缓存值，相关单元格将为空；请先在 Excel 重算并保存，或明确接受缺失。'})
+                if missing < len(sheet['formulas']):
+                    warnings.append({'code':'FORMULA_CACHE_UNVERIFIED','level':'warning','sheet_id':sheet_id,
+                        'message':'仅使用文件保存的公式缓存，未重新计算，无法保证其最新；请确认已重算保存。'})
                 warnings.append(
                     {
                         "code": "FORMULAS",
@@ -808,6 +828,10 @@ class WorkbookImportService:
                         "count": len(sheet["formulas"]),
                     }
                 )
+            errors_in_cells = sum(f.get('data_type') == 'e' or f.get('cached_type') == 'e' for f in sheet.get('cells',{}).values())
+            if errors_in_cells:
+                warnings.append({'code':'CELL_ERRORS','level':'warning','sheet_id':sheet_id,'count':errors_in_cells,
+                    'message':'工作表包含 Excel 错误值（如 #DIV/0!），请修正后导入或确认数据缺陷。'})
         return {
             "errors": errors,
             "warnings": warnings,
@@ -830,9 +854,16 @@ class WorkbookImportService:
         if entity.status not in {"draft", "ready"}:
             raise ValueError(f"Import in status {entity.status} cannot be committed")
         draft = load_draft(entity.draft_path)
+        digest = hashlib.sha256()
+        with open(entity.source_path,'rb') as source:
+            for block in iter(lambda:source.read(1024*1024), b''):
+                digest.update(block)
+        if digest.hexdigest() != entity.source_hash:
+            raise ValueError('源文件校验失败：解析后源文件已改变，请重新上传。')
         validation = self._validate_draft(draft)
         if validation["errors"]:
             raise ValueError("Validation errors must be fixed before commit")
+        draft['validation'] = validation
         required_codes = {item["code"] for item in validation["warnings"]}
         missing = required_codes - set(accepted_warning_codes)
         if missing:

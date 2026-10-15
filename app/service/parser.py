@@ -14,6 +14,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from datetime import date, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -79,6 +80,44 @@ def _serializable(value: Any) -> Any:
     return value
 
 
+def _identifier_label(label):
+    return bool(re.search(r'编码|编号|账号|账户|电话|手机|邮编|证件|序列号|(?i:\b(?:id|code|identifier|phone|account)\b)|(?i:id$)', str(label or '')))
+
+
+def _display_value(value, number_format):
+    """Render only unambiguous simple formats; preserve other formats verbatim."""
+    if value is None:
+        return None
+    if not isinstance(value, (int,float)) or isinstance(value, bool):
+        return str(_serializable(value))
+    fmt = number_format or 'General'
+    if len(fmt)>128:
+        return None
+    if fmt == 'General':
+        return str(value)
+    if re.fullmatch(r'0+',fmt) and Decimal(str(value)) == Decimal(str(value)).to_integral_value():
+        return str(int(value)).zfill(len(fmt))
+    match = re.fullmatch(r'0(?:\.(0+))?(%)?',fmt)
+    if match:
+        places = len(match.group(1) or '')
+        number = Decimal(str(value)) * (100 if match.group(2) else 1)
+        with localcontext() as context:
+            context.prec = max(28,len(number.as_tuple().digits)+abs(number.adjusted())+places+4)
+            return format(number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP),'f') + ('%' if match.group(2) else '')
+    return None
+
+
+def _identifier_value(value, fact):
+    if value is None:
+        return None
+    fmt = (fact or {}).get('number_format','General')
+    if not isinstance(value,bool) and isinstance(value,(int,float)):
+        number=Decimal(str(value))
+        if len(fmt)<=128 and re.fullmatch(r'0+',fmt) and number == number.to_integral_value():
+            return str(int(number)).zfill(len(fmt))
+    return str(value)
+
+
 def _infer_column(values: Iterable[Any]) -> Dict[str, Any]:
     present = [v for v in values if not _is_empty(v)]
     placeholders = [v for v in present if str(v).strip().lower() in PLACEHOLDER_VALUES]
@@ -87,15 +126,23 @@ def _infer_column(values: Iterable[Any]) -> Dict[str, Any]:
     integral = True
     for value in candidates:
         try:
-            number = float(value)
+            number = Decimal(str(value))
+            if not number.is_finite():
+                continue
             numeric.append(number)
-            if not number.is_integer():
+            if number != number.to_integral_value():
                 integral = False
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, InvalidOperation):
             pass
     numeric_ratio = len(numeric) / len(candidates) if candidates else 0.0
     if candidates and numeric_ratio == 1.0:
         sql_type = "INTEGER" if integral else "REAL"
+        if any(isinstance(v, str) and re.fullmatch(r'[+-]?0\d+', v.strip()) for v in candidates):
+            sql_type = 'TEXT'
+        if any(n < -(2**63) or n > 2**63-1 for n in numeric):
+            sql_type = 'TEXT'
+        if not integral and any(Decimal(str(float(n))) != n for n in numeric):
+            sql_type = 'TEXT'
     else:
         sql_type = "TEXT"
     return {
@@ -103,7 +150,7 @@ def _infer_column(values: Iterable[Any]) -> Dict[str, Any]:
         "non_empty_count": len(present),
         "numeric_count": len(numeric),
         "placeholder_count": len(placeholders),
-        "mixed_numeric": bool(numeric and placeholders),
+        "mixed_numeric": bool(numeric and placeholders and numeric_ratio == 1.0 and sql_type != 'TEXT'),
     }
 
 
@@ -287,7 +334,8 @@ def _sheet_xml_targets(archive: ZipFile) -> List[Tuple[str, str]]:
         for node in relationships.findall(f"{{{package_rel_ns}}}Relationship")
     }
     result: List[Tuple[str, str]] = []
-    for sheet_node in workbook.find("m:sheets", ns) or []:
+    sheet_nodes = workbook.find("m:sheets", ns)
+    for sheet_node in sheet_nodes if sheet_nodes is not None else []:
         relationship_id = sheet_node.attrib[f"{{{office_rel_ns}}}id"]
         target = targets[relationship_id]
         if target.startswith("/"):
@@ -363,6 +411,8 @@ def _sheet_metadata_from_xml(path: str, limits: ParserLimits) -> Dict[str, Dict[
     row_tag = f"{{{spreadsheet_ns}}}row"
     col_tag = f"{{{spreadsheet_ns}}}col"
     merge_tag = f"{{{spreadsheet_ns}}}mergeCell"
+    cell_tag = f"{{{spreadsheet_ns}}}c"
+    value_tag = f"{{{spreadsheet_ns}}}v"
     result: Dict[str, Dict[str, Any]] = {}
     merged_cells = 0
     with ZipFile(path) as archive:
@@ -370,10 +420,21 @@ def _sheet_metadata_from_xml(path: str, limits: ParserLimits) -> Dict[str, Dict[
             hidden_rows: List[int] = []
             hidden_columns: List[str] = []
             merged_ranges: List[str] = []
+            raw_cells = {}
+            inside_cell = False
             try:
                 with archive.open(target) as stream:
-                    for _, element in ElementTree.iterparse(stream, events=("end",)):
+                    for event, element in ElementTree.iterparse(stream, events=("start","end")):
                         tag = element.tag
+                        if event == 'start':
+                            if tag == cell_tag:
+                                inside_cell = True
+                            continue
+                        if tag == cell_tag:
+                            raw = element.find(value_tag)
+                            if raw is not None and raw.text is not None:
+                                raw_cells[element.attrib['r']] = (element.attrib.get('t','n'),raw.text)
+                            inside_cell = False
                         if tag == row_tag:
                             if element.attrib.get("hidden") == "1":
                                 hidden_rows.append(int(element.attrib["r"]))
@@ -400,13 +461,15 @@ def _sheet_metadata_from_xml(path: str, limits: ParserLimits) -> Dict[str, Dict[
                                     f"{limits.max_merged_cells} cells"
                                 )
                             merged_ranges.append(reference)
-                        element.clear()
+                        if not inside_cell:
+                            element.clear()
             except KeyError:
                 continue
             result[name] = {
                 "merged_ranges": merged_ranges,
                 "hidden_rows": hidden_rows,
                 "hidden_columns": hidden_columns,
+                'raw_cells':raw_cells,
             }
     return result
 
@@ -439,7 +502,9 @@ def _parse_streamed(
         formula_book.worksheets, value_book.worksheets
     ):
         name = formula_sheet.title
+        sheet_meta = metadata.get(name,{})
         formulas: Dict[str, Dict[str, Any]] = {}
+        cell_facts = {}
         rows: List[List[Any]] = []
         max_col = 0
         for formula_row, value_row in zip(
@@ -459,6 +524,29 @@ def _parse_streamed(
                     }
                 else:
                     value = _serializable(formula_cell.value)
+                xml_fact = sheet_meta.get('raw_cells',{}).pop(formula_cell.coordinate,None) if formula_cell.value is not None else None
+                raw_type, raw_xml = xml_fact if xml_fact else (formula_cell.data_type,None)
+                if (raw_type == 'n' and formula_cell.data_type != 'd' and raw_xml is not None
+                        and isinstance(value,(int,float)) and Decimal(str(value)) != Decimal(raw_xml)):
+                    value = raw_xml
+                if isinstance(formula_cell.value, float) and not math.isfinite(formula_cell.value):
+                    raise ValueError(f'Cell {formula_cell.coordinate} contains a non-finite number')
+                if formula_cell.value is not None:
+                    fmt = formula_cell.number_format or 'General'
+                    cell_facts[formula_cell.coordinate] = {
+                        'source_cell':formula_cell.coordinate, 'raw_value':_serializable(formula_cell.value),
+                        'value':value,'data_type':formula_cell.data_type,'number_format':fmt,
+                        'display_value':_display_value(value,fmt)}
+                    fact = cell_facts[formula_cell.coordinate]
+                    if formula_cell.data_type == 'f':
+                        fact['cached_type'] = value_cell.data_type
+                        if value_cell.data_type == 'd':
+                            fact.update(date_epoch=str(formula_book.epoch),display_value=None)
+                    if raw_xml is not None:
+                        fact.update(raw_xml_value=raw_xml,raw_xml_type=raw_type)
+                    if formula_cell.data_type == 'd':
+                        fact.update(raw_value=raw_xml,data_type=raw_type,decoded_type='d',
+                            date_epoch=str(formula_book.epoch),display_value=None)
                 value_chars = len(value) if isinstance(value, str) else 0
                 formula_chars = (
                     len(str(formula_cell.value))
@@ -494,7 +582,6 @@ def _parse_streamed(
         # not an inflated sheet dimension (e.g. a stray cell far to the right).
         if max_col and rows:
             rows = [row[:max_col] for row in rows]
-        sheet_meta = metadata.get(name, {})
         merged: Dict[str, Dict[str, Any]] = {}
         for reference in sheet_meta.get("merged_ranges", []):
             start, end = (
@@ -526,6 +613,7 @@ def _parse_streamed(
                 sheet_meta.get("hidden_rows", []),
                 sheet_meta.get("hidden_columns", []),
                 formulas,
+                cell_facts,
             )
         )
     return parsed_sheets
@@ -723,23 +811,24 @@ def parse_workbook(
     suffix = Path(path).suffix.lower()
     if suffix == ".csv":
         rows = _rows_from_csv(path, limits)
-        return _build_draft(
+        facts = {f'{_column_letter(c)}{r}':{'source_cell':f'{_column_letter(c)}{r}',
+            'raw_value':v,'value':v,'data_type':'s','number_format':'General','display_value':v}
+            for r,row in enumerate(rows,1) for c,v in enumerate(row,1) if not _is_empty(v)}
+        draft = _build_draft(
             file_name or Path(path).name,
-            [("data", rows, {}, [], [], {})],
+            [("data", rows, {}, [], [], {}, facts)],
             sheet_overrides=sheet_overrides,
         )
+        draft['parser'] = {'engine':'csv','fallback':False}
+        return draft
     if suffix not in {".xlsx", ".xlsm"}:
         raise ValueError("Only .xlsx, .xlsm and .csv files are supported")
     _validate_zip_package(path, limits)
 
     try:
         from openpyxl import load_workbook
-    except ImportError:
-        return _build_draft(
-            file_name or Path(path).name,
-            _parse_xlsx_without_openpyxl(path, limits),
-            sheet_overrides=sheet_overrides,
-        )
+    except ImportError as exc:
+        raise ValueError('缺少 openpyxl，无法可靠解析工作簿；禁止静默降级。') from exc
 
     # openpyxl 3.1.2 (and some 3.1.x) rejects workbooks whose AutoFilter uses a
     # customFilter whose val is free-form text (e.g. Chinese) in read/write mode:
@@ -753,19 +842,16 @@ def parse_workbook(
     # the server on large imports.  read_only=True streams cells instead.  The
     # merged/hidden layout read_only drops is recovered from a lightweight
     # streaming pass over the sheet XML (_sheet_metadata_from_xml).
+    formula_book = value_book = None
+    metadata = _sheet_metadata_from_xml(path, limits)
     try:
-        metadata = _sheet_metadata_from_xml(path, limits)
         formula_book = load_workbook(path, data_only=False, read_only=True)
         value_book = load_workbook(path, data_only=True, read_only=True)
-    except Exception:
-        # Any openpyxl quirk (e.g. certain AutoFilter values, odd packages)
-        # falls back to the raw-OOXML parser that understands merged cells,
-        # hidden rows and formulas without those checks.
-        return _build_draft(
-            file_name or Path(path).name,
-            _parse_xlsx_without_openpyxl(path, limits),
-            sheet_overrides=sheet_overrides,
-        )
+    except Exception as exc:
+        for opened in (formula_book,value_book):
+            if opened is not None:
+                opened.close()
+        raise ValueError('工作簿无法可靠解析，请检查格式或重新另存为 XLSX；未启用有损回退。') from exc
     try:
         dimension_cells = 0
         for sheet in formula_book.worksheets:
@@ -791,11 +877,13 @@ def parse_workbook(
     finally:
         formula_book.close()
         value_book.close()
-    return _build_draft(
+    draft = _build_draft(
         file_name or Path(path).name,
         parsed_sheets,
         sheet_overrides=sheet_overrides,
     )
+    draft['parser'] = {'engine':'openpyxl','fallback':False,'formula_policy':'cached_values_unverified'}
+    return draft
 
 
 def _build_draft(
@@ -806,14 +894,9 @@ def _build_draft(
     sheets: List[Dict[str, Any]] = []
     workbook_metadata: List[Dict[str, Any]] = []
     sheet_overrides = sheet_overrides or {}
-    for sheet_index, (
-        name,
-        rows,
-        merged,
-        hidden_rows,
-        hidden_columns,
-        formulas,
-    ) in enumerate(parsed_sheets):
+    for sheet_index, parsed in enumerate(parsed_sheets):
+        name, rows, merged, hidden_rows, hidden_columns, formulas = parsed[:6]
+        cell_facts = parsed[6] if len(parsed)>6 else {}
         sheet_id = f"sheet_{sheet_index + 1}"
         override = sheet_overrides.get(sheet_id) or sheet_overrides.get(name)
         if not rows:
@@ -859,20 +942,100 @@ def _build_draft(
                 if not _is_empty(value):
                     last_col = max(last_col, index)
         data_rows = []
+        excluded_rows = []
+        source_record_count = 0
+        issues = []
+        normalized_header = [normalize_label(v) for v in header[:last_col]]
+        labels = [v for v in normalized_header if v]
+        occupied = [False]*last_col
+        for candidate in rows[header_index:]:
+            for i,value in enumerate(candidate[:last_col]):
+                occupied[i] = occupied[i] or not _is_empty(value)
+        runs = []
+        for used_column in occupied:
+            if used_column:
+                if not runs or runs[-1] == 0:
+                    runs.append(1)
+                else:
+                    runs[-1] += 1
+            elif runs and runs[-1] != 0:
+                runs.append(0)
+        if sum(width>=2 for width in runs) >= 2:
+            issues.append({'code':'MULTIPLE_TABLE_REGIONS','level':'error',
+                'message':f'{name} 的空列分隔了多个表区，请拆分工作表后导入。'})
+        if len(labels)-len(set(labels)) >= 2:
+            issues.append({'code':'MULTIPLE_TABLE_REGIONS','level':'error',
+                'message':f'{name} 疑似包含并排表区，不能按同一行拼接建库；请拆分工作表或整理表头。'})
+        for item in merged.values():
+            if item['source_cell'] == '':
+                continue
+            begin, end = item['range'].split(':') if ':' in item['range'] else (item['range'],item['range'])
+            r1,c1 = _parse_cell_reference(begin)
+            r2,c2 = _parse_cell_reference(end)
+            if (r1 < r2 and r1 <= header_index+1 <= r2 or
+                    (r1 == header_index+1 and c2>c1 and c2-c1+1<last_col)):
+                issues.append({'code':'UNVERIFIED_HEADER_STRUCTURE','level':'error',
+                    'message':f'{name} 存在多级/合并表头，无法可靠确定列含义；请整理为单行表头或明确指定数据范围。'})
+                break
+        field_words = set(HEADER_FIELD_WORDS) | set(COMMON_COLUMN_NAMES) | {'日期','数量','项目','金额','收入','地区','年份'}
+        source_classifications = {str(header_index+1):'header'}
+        for r, earlier in enumerate(rows[:header_index],1):
+            filled=[v for v in earlier if not _is_empty(v)]
+            if not filled:
+                continue
+            role='explicit_prefix' if override else 'title' if len(filled)==1 else 'metadata'
+            looks_like_header = sum(normalize_label(v) in field_words or _identifier_label(v) for v in filled) >= 2
+            if not override and len(filled)>1 and (looks_like_header or not _extract_metadata([earlier],name)):
+                role='unclassified'
+                issues.append({'code':'UNCLASSIFIED_SOURCE_REGION','level':'error',
+                    'message':f'{name} 表头前第 {r} 行可能包含遗漏业务数据，请拆分表区。'})
+            source_classifications[str(r)] = role
+        for r in range(header_index+2,data_start_index+1):
+            if any(not _is_empty(v) for v in rows[r-1]):
+                source_classifications[str(r)] = 'explicit_prefix'
         for source_row, row in enumerate(
             rows[data_start_index:], data_start_index + 1
         ):
             effective = list(row[:last_col]) + [None] * max(0, last_col - len(row))
+            raw_values = [_serializable(v) for v in effective]
             for col_index in range(1, last_col + 1):
                 coordinate = f"{_column_letter(col_index)}{source_row}"
                 if _is_empty(effective[col_index - 1]) and coordinate in merged:
                     effective[col_index - 1] = merged[coordinate]["value"]
-            if any(not _is_empty(v) for v in effective):
+                fact = cell_facts.get(coordinate)
+                label = header[col_index-1] if col_index<=len(header) else ''
+                if _identifier_label(label):
+                    anchor = merged.get(coordinate,{}).get('source_cell')
+                    effective[col_index-1] = _identifier_value(effective[col_index-1],cell_facts.get(anchor) if anchor else fact)
+            if (any(not _is_empty(v) for v in raw_values) or
+                    any(f'{_column_letter(c)}{source_row}' in cell_facts for c in range(1,last_col+1))):
+                source_record_count += 1
+                source_classifications[str(source_row)]='data'
+                reason = None
+                if [normalize_label(v) for v in effective] == normalized_header:
+                    reason = 'repeated_header'
+                filled = [v for v in effective if not _is_empty(v)]
+                first = str(filled[0]).strip() if filled else ''
+                if (reason != 'repeated_header' and source_row > data_start_index+1
+                        and not any(not _is_empty(v) for v in rows[source_row-2])
+                        and sum(normalize_label(v) in field_words for v in filled) >= 2):
+                    issues.append({'code':'MULTIPLE_TABLE_REGIONS','level':'error',
+                        'message':f'{name} 第 {source_row} 行疑似开始另一张表；请拆分后导入。'})
+                if reason is None and re.fullmatch(r'(?:合计|总计|小计|累计|本页小计)[:：]?',first):
+                    reason = 'summary'
+                if reason is None and re.match(r'^(?:备注|说明)[:：]',first) and all(v == filled[0] for v in filled):
+                    reason = 'note'
+                if reason:
+                    source_classifications[str(source_row)] = reason
+                    excluded_rows.append({'source_row':source_row,'reason':reason,'values':raw_values})
+                    continue
                 data_rows.append(
                     {
                         "source_row": source_row,
                         "hidden": source_row in hidden_rows,
                         "values": [_serializable(v) for v in effective],
+                        "raw_values": raw_values,
+                        'cells':{_column_letter(c):cell_facts[f'{_column_letter(c)}{source_row}'] for c in range(1,last_col+1) if f'{_column_letter(c)}{source_row}' in cell_facts},
                     }
                 )
         # Very small key/value layouts frequently look tabular around one row (for
@@ -881,8 +1044,12 @@ def _build_draft(
         # A CSV is intrinsically one tabular sheet (named ``data`` above), so
         # allow small files. Excel cover/key-value sheets still need enough
         # records to be proposed as business data.
+        known_labels = set(HEADER_FIELD_WORDS) | set(COMMON_COLUMN_NAMES) | {
+            '项目','金额','地区','年份','计划','实际','负责人','时间','投资','状态','日期','完成率',
+            'name','amount','quantity','price','date','code','id'}
+        small_table = len(data_rows) >= 1 and sum(v in known_labels or _identifier_label(v) for v in labels) >= 2
         is_data = bool(override) or (header_score >= 8 and (
-            len(data_rows) >= 5 or (name == "data" and len(data_rows) >= 1)
+            len(data_rows) >= 5 or small_table or (name == "data" and len(data_rows) >= 1)
         ))
         if not is_data:
             metadata = _extract_metadata(rows, name)
@@ -905,6 +1072,8 @@ def _build_draft(
                         {value["range"] for value in merged.values()}
                     ),
                     "formulas": formulas,
+                    'cells':cell_facts,
+                    'issues':issues,
                 }
             )
             continue
@@ -917,6 +1086,10 @@ def _build_draft(
 
         used: set[str] = set()
         columns: List[Dict[str, Any]] = []
+        column_formats = {}
+        for coordinate, fact in cell_facts.items():
+            letter = re.match(r'[A-Z]+',coordinate)[0]
+            column_formats.setdefault(letter,set()).add(fact.get('number_format','General'))
         for col_index in range(1, last_col + 1):
             original_name = header[col_index - 1] if col_index <= len(header) else None
             empty_header = _is_empty(original_name)
@@ -927,10 +1100,9 @@ def _build_draft(
             physical_name = safe_identifier(chinese_alias, fallback, used)
             values = [row["values"][col_index - 1] for row in data_rows]
             inference = _infer_column(values)
-            if "编码" in str(original_name or "").replace("\n", "") or str(
-                original_name or ""
-            ).strip().lower().endswith("id"):
+            if _identifier_label(original_name):
                 inference["sql_type"] = "TEXT"
+                inference['mixed_numeric'] = False
             columns.append(
                 {
                     "column_id": f"{sheet_id}_column_{col_index}",
@@ -943,6 +1115,11 @@ def _build_draft(
                     "nullable": True,
                     "enabled": True,
                     "empty_header": empty_header,
+                    'semantic_type':('identifier' if _identifier_label(original_name) else
+                        'amount' if re.search(r'金额|投资|费用|预算|造价|单价|总价|(?i:amount|price|cost)',str(original_name or '')) else
+                        'percentage' if re.search(r'率|百分比',str(original_name or '')) else 'value'),
+                    'number_formats':sorted(column_formats.get(_column_letter(col_index),set())),
+                    'unit_hint':str(original_name or ''),
                     **inference,
                 }
             )
@@ -961,6 +1138,11 @@ def _build_draft(
                 "header_row": header_index + 1,
                 "data_start_row": data_start_index + 1,
                 "row_count": len(data_rows),
+                "source_record_count": source_record_count,
+                'source_classifications':source_classifications,
+                'cells':cell_facts,
+                "excluded_rows": excluded_rows,
+                "issues": issues,
                 "column_count": last_col,
                 "columns": columns,
                 "rows": data_rows,
@@ -973,7 +1155,7 @@ def _build_draft(
             }
         )
     return {
-        "format_version": 1,
+        "format_version": 2,
         "file_name": file_name,
         "sheets": sheets,
         "metadata": workbook_metadata,

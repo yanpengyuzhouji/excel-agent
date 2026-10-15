@@ -12,6 +12,58 @@ from app.main import app
 
 
 class AttachmentApiTests(unittest.TestCase):
+    def upload_rows(self, rows):
+        book = Workbook()
+        for row in rows:
+            book.active.append(row)
+        out = io.BytesIO()
+        book.save(out)
+        book.close()
+        response = self.client.post(f'/api/v1/agent/conversations/{self.conv}/attachments',
+            files={'file':('integrity.xlsx',out.getvalue())})
+        self.assertEqual(response.status_code,200,response.text)
+        return response.json()
+
+    def test_p0_identifiers_survive_automatic_import_and_query(self):
+        item = self.upload_rows([['项目编号','金额'],['00001',10],['9007199254740993',20]])
+        self.assertEqual(item['status'],'ready',item)
+        catalog = next(c for c in self.client.get('/api/v1/data-catalog').json() if c['workbook_id']==item['workbook_id'])
+        table = catalog['catalog']['tables'][0]
+        name = table['columns'][0]['physical_name']
+        result = self.client.post(f"/api/v1/workbooks/{item['workbook_id']}/query",json={'sql':f'SELECT "{name}" FROM "{table["table_name"]}" ORDER BY _source_row'})
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertEqual(result.json()['rows'],[['00001'],['9007199254740993']])
+
+    def test_p0_repeated_header_requires_review(self):
+        item = self.upload_rows([['项目','金额'],['甲',10],['乙',20],['项目','金额'],['合计',30]])
+        self.assertEqual(item['status'],'needs_review',item)
+        self.assertIn('NONBUSINESS_ROWS',[w['code'] for w in item['severe_warnings']])
+        self.assertEqual(self.client.get(f'/api/v1/agent/conversations/{self.conv}').json()['scope']['workbook_ids'],[])
+        confirmed = self.client.post(f"/api/v1/agent/conversations/{self.conv}/attachments/{item['import_id']}/confirm",
+            json={'revision':item['revision'],'accept_severe_warnings':True})
+        self.assertEqual(confirmed.status_code,200,confirmed.text)
+        self.assertEqual(confirmed.json()['status'],'ready')
+        catalog = next(c for c in self.client.get('/api/v1/data-catalog').json() if c['workbook_id']==item['workbook_id'])
+        self.assertEqual(catalog['catalog']['tables'][0]['row_count'],2)
+        self.assertEqual(catalog['catalog']['tables'][0]['excluded_row_count'],2)
+
+    def test_p0_parallel_tables_cannot_be_confirmed(self):
+        item = self.upload_rows([['项目','金额','项目','金额']]+[[f'P{i}',i,f'Q{i}',i] for i in range(6)])
+        self.assertEqual(item['status'],'blocked',item)
+        result = self.client.post(f"/api/v1/agent/conversations/{self.conv}/attachments/{item['import_id']}/confirm",
+            json={'revision':item['revision'],'accept_severe_warnings':True})
+        self.assertEqual(result.json()['status'],'blocked')
+
+    def test_p0_source_change_prevents_confirmation(self):
+        from pathlib import Path
+        item = self.upload(formula=True)
+        entity = app.state.excel_service._load_entity(item['import_id'])
+        Path(entity.source_path).write_bytes(b'changed test fixture')
+        result = self.client.post(f"/api/v1/agent/conversations/{self.conv}/attachments/{item['import_id']}/confirm",
+            json={'revision':item['revision'],'accept_severe_warnings':True})
+        self.assertEqual(result.status_code,400,result.text)
+        self.assertIn('源文件',result.json()['detail'])
+
     def test_agent_streamed_answer_is_persisted_once(self):
         import json
         attachment = self.upload()

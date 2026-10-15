@@ -12,7 +12,7 @@ def review_issues(import_response):
             continue
         missing = sum(1 for formula in (sheet.get('formulas') or {}).values()
                       if formula.get('cached_value') is None)
-        if missing:
+        if missing and not any(w.get('code') == 'FORMULA_CACHE_MISSING' for w in severe):
             severe.append({'code': 'FORMULA_CACHE_MISSING', 'message':
                            f"{sheet.get('sheet_name') or sheet.get('name') or sheet.get('sheet_id')} 有 {missing} 个公式缺少缓存值，请在 Excel 中重算并保存，或明确接受空值。"})
     return errors, severe

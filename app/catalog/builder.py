@@ -115,6 +115,9 @@ def build_catalog_payload(
                         ),
                         "sql_type": _text(column.get("sql_type") or "TEXT", 32),
                         "mixed_numeric": bool(column.get("mixed_numeric")),
+                        'semantic_type':_text(column.get('semantic_type'),32),
+                        'unit_hint':_text(column.get('unit_hint'),300),
+                        'number_formats':[_text(f,100) for f in column.get('number_formats',[])[:5]],
                     }
                 )
             tables.append(
@@ -125,6 +128,11 @@ def build_catalog_payload(
                     ),
                     "row_count": row_count,
                     "columns": columns,
+                    'source_record_count':manifest_table.get('source_record_count'),
+                    'excluded_row_count':manifest_table.get('excluded_row_count',0),
+                    'parser':manifest_table.get('parser') or {},
+                    'ingestion_notes':[{'code':_text(n.get('code'),80),'message':_text(n.get('message'),500)}
+                        for n in manifest_table.get('ingestion_notes',[])[:20]],
                 }
             )
     finally:
