@@ -1,0 +1,105 @@
+security:
+  # Open/shared mode: no access credential or visitor-level session isolation.
+  require_auth: false
+  api_keys_env: "RONGNENG_API_KEYS_JSON"
+  single_api_key_env: "RONGNENG_API_KEY"
+  single_principal_env: "RONGNENG_API_PRINCIPAL"
+
+server:
+  # 0.0.0.0 允许局域网内其他机器访问；仅本机用 127.0.0.1
+  host: "0.0.0.0"
+  port: 8090
+  storage_path: "data/workbook_imports"
+  # Optional local CJK font for server-side PDF rendering.  If empty, the
+  # service auto-detects common Noto/WQY fonts and WSL Windows fonts.  The
+  # environment variable EXCEL_REPORT_PDF_FONT_PATH takes precedence.
+  pdf_font_path: ""
+  preview_page_size: 100
+  query_row_limit: 500
+  # Import guardrails against memory exhaustion (the legacy parser OOM'd on
+  # large uploads).  Raise these if a legitimately large workbook is rejected;
+  # the import is refused with a clear error rather than the process being killed.
+  max_import_bytes: 209715200   # 200 MB, reject uploads over this
+  max_import_rows: 100000       # per-sheet logical row limit
+  max_import_columns: 512       # per-sheet column limit
+  max_import_cells: 2000000     # rectangular grid cells across all sheets
+  max_cell_chars: 32767         # Excel-compatible per-cell text ceiling
+  max_total_text_chars: 67108864 # text retained in a draft across all sheets
+  max_uncompressed_bytes: 268435456 # total OOXML ZIP expanded bytes (256 MB)
+  max_zip_ratio: 200            # per-entry compression ratio (for entries >1 MB)
+  max_zip_entries: 10000
+  max_merged_cells: 200000      # maximum expanded cells across merge ranges
+  max_xml_entry_bytes: 67108864 # reject a single XML part over 64 MB
+  max_concurrent_imports: 2     # reject excess parse jobs; do not queue unbounded work
+  sql_timeout_ms: 5000          # wall-clock ceiling for one SQLite statement
+  sql_vm_steps: 2000000         # approximate SQLite VM instruction ceiling
+  max_concurrent_sql: 4
+  max_concurrent_agent_runs: 2
+
+excel:
+  # Default can be overridden by EXCEL_LLM_BASE_URL / MODEL / API_KEY.
+  llm:
+    name: deepseek-v4-flash
+    label: DeepSeek Flash
+    base_url: https://api.deepseek.com/v1
+    model: deepseek-flash
+    api_key_env: DEEPSEEK_API_KEY
+    env_file: .env
+    temperature: 0.1
+    max_tokens: 8192
+    timeout: 90
+    max_retries: 0
+    provider: deepseek
+  llms:
+    # Retain the old selector name for existing conversations, use the live model ID.
+    - name: deepseek-v4-flash
+      label: DeepSeek Flash
+      base_url: https://api.deepseek.com/v1
+      model: deepseek-flash
+      api_key_env: DEEPSEEK_API_KEY
+      env_file: .env
+      temperature: 0.1
+      max_tokens: 8192
+      timeout: 90
+      max_retries: 0
+      provider: deepseek
+    - name: "Qwen3.8-27B-ModelScope"
+      label: "Qwen3.8-27B (ModelScope)"
+      base_url: "https://api-inference.modelscope.cn/v1"
+      model: "Qwen/Qwen3.8-27B"
+      api_key: ""
+      api_key_env: "MODELSCOPE_API_KEY"
+      env_file: ".env"
+      extra_body:
+        enable_thinking: false
+      stream: true
+      temperature: 0.7
+      max_tokens: 8192
+      timeout: 300
+      max_retries: 2
+      analysis_route: large
+      model_size_b: 27
+      provider: modelscope
+  agent:
+    # The global Agent is enabled by default. Set false for a reversible
+    # rollout/rollback without changing the per-workbook API contract.
+    multi_workbook_enabled: true
+    max_selected_workbooks: 5
+    max_queried_workbooks: 3
+    # Bounded multi-workbook Agent execution; all configured models share this loop.
+    max_loops: 100
+    sql_max_rows: 500
+    max_llm_calls: 100
+    max_tool_calls: 100
+    max_sql_calls: 50
+    max_total_tokens: 200000    # conservative char-based estimate without tokenizer
+    max_prompt_chars: 600000
+    max_seconds: 300
+    max_conversation_llm_calls: 100
+    max_conversation_tool_calls: 100
+    max_conversation_sql_calls: 50
+    max_conversation_tokens: 500000
+    # Application context capacity (not a claim about a provider's maximum).
+    # Per-model context_window_tokens overrides this conservative default.
+    context_window_tokens: 32000
+    context_auto_compress: true

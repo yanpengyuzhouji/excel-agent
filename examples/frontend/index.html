@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Excel 问答</title>
+<link rel="stylesheet" href="attachments.css?v=answer-attachments-1"></head>
+<body class="chat-mode">
+<aside id="sidebar"><div class="sidebar-head"><strong>Excel 问答</strong><button id="newChat">＋ 新对话</button></div><input id="historySearch" placeholder="搜索历史会话" aria-label="搜索历史会话"><nav id="conversationList" aria-label="会话历史"></nav><div class="sidebar-foot"><span>开放使用 · 会话历史共享</span></div></aside>
+<main><header><button id="toggleSidebar" aria-label="收起或展开会话历史">☰</button><strong id="conversationTitle">新对话</strong><span id="connectionStatus" role="status"></span></header>
+<section class="transcript" id="globalTranscript"><div id="globalWelcome" class="welcome"><span class="sheet-mark">▤</span><h1>聊聊问题，也聊聊数据。</h1><p>直接提问即可聊天；添加 Excel 后，可以查询、比较数据或生成报告。</p></div><div id="globalPast"></div><div id="globalQuestion" class="agent-question message-user" aria-label="你的消息" hidden></div>
+<div id="globalLog"><details id="globalProcess" class="chat-process" hidden><summary><span class="process-heading"><span id="globalStatus"></span><span id="globalElapsed" class="process-elapsed"></span></span><span id="globalStepCount"></span></summary><div id="globalSteps"></div><div id="globalNotices"></div></details></div>
+<button id="globalRetry" hidden>重试本次问题</button><div id="globalAnswer" class="global-answer" hidden></div><div id="globalReport" hidden></div></section>
+<div class="dock"><div id="composer" class="composer"><div id="attachmentChips" aria-live="polite"></div><textarea id="globalInput" rows="3" placeholder="直接提问，或添加 Excel 分析数据…" aria-label="输入问题"></textarea>
+<div class="composer-tools"><button id="globalUpload" aria-label="添加 Excel 附件" title="添加 Excel 附件">＋</button><details class="scope-menu"><summary id="scopeLabel">本会话附件</summary><div id="globalSources"></div></details><select id="globalModel" aria-label="选择模型"></select><span class="spacer"></span><button id="globalAskBtn" aria-label="发送问题">↑</button></div></div>
+<div class="caption"><details><summary id="globalContextSummary">上下文 0k / 32k · 估算</summary><div><progress id="globalContextBar" value="0" max="32000"></progress><p id="globalContextInfo"></p></div></details><span>Enter 发送 · Shift + Enter 换行</span></div></div>
+</main><input id="fileInput" type="file" accept=".xlsx,.xlsm,.csv" multiple hidden>
+<dialog id="reviewDialog"><h2>附件需要确认</h2><p id="reviewFilename"></p><div id="reviewIssues"></div><p class="muted">取消后附件不会参与查询。建议先修正源文件再重新上传。</p><div class="dialog-actions"><button id="reviewCancel">取消附件</button><button id="reviewAccept">接受上述风险并继续</button></div></dialog>
+<dialog id="deleteConversationDialog" aria-labelledby="deleteConversationHeading" aria-describedby="deleteConversationDescription">
+ <form method="dialog"><h2 id="deleteConversationHeading">删除对话？</h2><p id="deleteConversationDescription">将删除对话 <strong id="deleteConversationName"></strong> 的消息记录、独占附件和生成报告。</p><p class="delete-note">删除后无法恢复。仍被其他会话使用的工作簿会保留。</p><div class="delete-actions"><button value="cancel" autofocus>取消</button><button value="delete" id="confirmDeleteConversation">删除</button></div></form>
+</dialog>
+<script>
+const API='/api/v1';
+const $=s=>document.querySelector(s);
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+if(window.innerWidth<800)document.body.classList.add('sidebar-collapsed');
+const globalAgent={conversations:[],catalogs:[],models:[],history:[],attachments:[],selectedWorkbookIds:[],steps:[],sources:[],report:null,answer:'',status:'准备就绪',currentRound:0,context:null,model:'',draft:'',busy:false,uploading:false,selectedConversationId:'',processExpanded:false};
+let executionTimer=null,executionStarted=null;
+$('#globalProcess').ontoggle=()=>{globalAgent.processExpanded=$('#globalProcess').open;};
+$('#globalElapsed').title='点击展开或收起执行过程';
+function formatExecutionTime(ms){const seconds=Math.floor(Math.max(0,ms)/1000);return seconds<60?`${seconds} 秒`:`${Math.floor(seconds/60)} 分 ${seconds%60} 秒`;}
+function renderExecutionTime(){const el=$('#globalElapsed');if(!el)return;const ms=executionStarted!==null?performance.now()-executionStarted:globalAgent.timing?.elapsed_ms;el.textContent=Number.isFinite(ms)?`${executionStarted!==null?'已用时':'用时'} ${formatExecutionTime(ms)}`:'';}
+function startExecutionTimer(){clearInterval(executionTimer);globalAgent.timing=null;executionStarted=performance.now();executionTimer=setInterval(renderExecutionTime,250);renderExecutionTime();}
+function stopExecutionTimer(timing){if(executionStarted!==null)globalAgent.timing=timing||{elapsed_ms:performance.now()-executionStarted};else if(timing)globalAgent.timing=timing;clearInterval(executionTimer);executionTimer=null;executionStarted=null;renderExecutionTime();}
+function answerTimestampHtml(timing,sources=[]){
+ const names=sources.map(s=>`<span class="answer-attachment">${esc(s.display_name||s.filename||s.workbook_id||'')}</span>`).join('');
+ if(!timing?.completed_at)return names?`<footer class="answer-meta">${names}</footer>`:'';
+ const date=new Date(timing.completed_at);if(Number.isNaN(date.getTime()))return '';
+ const short=date.toLocaleTimeString('zh-CN',{hour:'numeric',minute:'2-digit',hour12:false});
+ const full=date.toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+ return `<footer class="answer-meta">${names}<time tabindex="0" datetime="${esc(date.toISOString())}" aria-label="回答完成于 ${esc(full)}" data-tooltip="${esc(full)}">${esc(short)}</time></footer>`;
+}
+async function api(path,opts={}){const r=await fetch(API+path,opts);if(!r.ok){const text=await r.text();let detail=text;try{detail=JSON.parse(text).detail||text;}catch{}throw Error(String(detail).slice(0,250));}return r.status===204?null:r.json();}
+function notice(text){const el=document.createElement('p');el.textContent=text;el.className='error';$('#globalNotices').appendChild(el);$('#connectionStatus').textContent=text;}
+function globalActionLabel(action) {
+  return ({read_query_result:'读取已保存查询证据', verify_record_count:'核验总行数与业务记录口径', observe_execution:'检查执行状态与数据证据', search_workbooks:'查找工作簿', inspect_workbook:'查看结构与样本', inspect_source:'查看结构与样本', query_workbook:'查询数据', sql_query:'查询数据', aggregate_results:'汇总与比较', html_interpreter:'生成分析报告'})[action] || action || '执行步骤';
+}
+function globalAnswerHtml(text) {
+  const format = value => esc(value).replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>');
+  const inline = value => {
+    // Only link local report routes; model-provided HTML and external URLs stay text.
+    const pattern = /(?:\[[^\]\n]*\]\()?((?:\/api\/v1\/(?:agent\/conversations|workbooks)\/[A-Za-z0-9_-]+\/reports\/)[A-Za-z0-9_%\\-]+)(?:\))?/g;
+    let output = '', offset = 0;
+    for (const match of String(value).matchAll(pattern)) {
+      const url = match[1].replace(/\\_/g, '_');
+      output += format(value.slice(offset, match.index)) + `<a href="${esc(url)}" target="_blank" rel="noopener">查看报告 ↗</a>`;
+      offset = match.index + match[0].length;
+    }
+    return output + format(value.slice(offset));
+  };
+  const lines = String(text || '').replace(/\r/g,'').split('\n');
+  const output = [];
+  const cells = line => line.trim().replace(/^\||\|$/g,'').split('|').map(s=>s.trim());
+  for (let i=0;i<lines.length;) {
+    const line=lines[i];
+    if (!line.trim()) { i++; continue; }
+    if (/^```/.test(line)) {
+      const code=[]; i++;
+      while(i<lines.length && !/^```/.test(lines[i])) code.push(lines[i++]);
+      i++; output.push(`<pre><code>${esc(code.join('\n'))}</code></pre>`); continue;
+    }
+    if (line.includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[i+1] || '')) {
+      const header=cells(line); i+=2; const rows=[];
+      while(i<lines.length && lines[i].includes('|')) rows.push(cells(lines[i++]));
+      output.push(`<div class="answer-table"><table><thead><tr>${header.map(c=>`<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${header.map((_,j)=>`<td>${inline(r[j] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`); continue;
+    }
+    const heading=line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) { output.push(`<h3>${inline(heading[2])}</h3>`); i++; continue; }
+    const list=line.match(/^\s*(?:([-*])|\d+\.)\s+(.+)$/);
+    if (list) {
+      const tag=list[1]?'ul':'ol'; const items=[];
+      while(i<lines.length) { const m=lines[i].match(/^\s*(?:([-*])|\d+\.)\s+(.+)$/); if (!m || (m[1]?'ul':'ol')!==tag) break; items.push(`<li>${inline(m[2])}</li>`); i++; }
+      output.push(`<${tag}>${items.join('')}</${tag}>`); continue;
+    }
+    output.push(`<p>${inline(line)}</p>`); i++;
+  }
+  return output.join('');
+}
+function globalStepBody(result) {
+  if (result.cached) return `<p class="muted">读取缓存证据，未重新执行 SQL。当前页 ${esc(result.page?.shown || 0)} 行／缓存 ${esc(result.page?.total_cached_rows || 0)} 行${result.page?.has_more ? '，还有后续数据' : ''}。</p>${globalResultHtml(result)}`;
+  if (result.counting_check) { const c=result.counting_check; return `<p>总行数：${esc(c.total_rows)} · 疑似备注／汇总行：${esc(c.suspected_nonbusiness_rows)} · 候选业务记录：${esc(c.candidate_business_rows)}</p><p class="muted">疑似行需结合业务含义确认，未自动删除或排除。</p>${globalResultHtml(result)}${c.sample_rows?.length ? '<h4>疑似非业务行样本</h4>'+globalResultHtml({columns:c.sample_columns,rows:c.sample_rows}) : ''}`; }
+  if (result.successful_queries != null) return `<p>有效查询：${esc(result.successful_queries)} 项 · ${result.report_ready ? '已有报告数据依据' : '尚缺成功查询'}</p>${(result.evidence || []).map(r=>`<p><code>${esc(r.result_id)}</code> · ${esc(r.row_count)} 行${r.empty ? ' · 空结果' : ''}${r.truncated ? ' · 结果截断，按需补查' : ''}</p>`).join('')}<p>查询失败来源：${esc((result.failed_sources || []).length)} 个</p>`;
+  if (result.error) return `<div class="err">${esc(result.error)}</div>`;
+  if (result.report_id) return `<a href="${esc(result.url)}" target="_blank" rel="noopener">打开 ${esc(result.title || '分析报告')}</a>`;
+  if (result.columns) return globalResultHtml(result);
+  if (result.tables) return result.tables.map(t => `<h4>${esc(t.display_name || t.table_name)}</h4>${globalResultHtml({columns:t.sample_columns,rows:t.sample_rows})}`).join('');
+  if (result.candidates) return result.candidates.map(c => `<p>${esc(c.display_name || c.workbook_id)}</p>`).join('');
+  return '<span class="muted">执行完成</span>';
+}
+
+function globalResultHtml(ev) {
+  const columns = ev.columns || [];
+  const rows = ev.rows || [];
+  return `${ev.sql ? `<pre>${esc(ev.sql)}</pre>` : ''}<div style="overflow:auto"><table><thead><tr>${columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(value => `<td>${esc(value == null ? '' : String(value))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>${ev.truncated ? '<div class="muted">结果已截断，不能视为完整数据。</div>' : ''}`;
+}
+
+
+function renderGlobalContext() {
+  const badge=$('#globalContextSummary'); if (!badge) return;
+  const c=globalAgent.context || {};
+  const model=globalAgent.models.find(m=>m.name===globalAgent.model) || globalAgent.models.find(m=>m.default) || globalAgent.models[0] || {};
+  const total=c.total_tokens || model.context_window_tokens || 32000;
+  const used=(c.used_tokens || 0)+Math.ceil((globalAgent.draft || '').length/4);
+  const reserve=c.output_reserve_tokens || model.output_reserve_tokens || 4096;
+  const pending=used>=(total-reserve)*.8;
+  const k=n=>(n/1000).toFixed(n<10000?1:0)+'k';
+  badge.textContent=`上下文 ${k(used)} / ${k(total)} · 估算${pending?' · 待压缩':''}`;
+  const bar=$('#globalContextBar'); if(bar) {bar.value=Math.min(used,total);bar.max=total;}
+  const info=$('#globalContextInfo'); if(info) info.textContent=`应用配置窗口 ${k(total)}，当前约 ${k(used)}；预留输出 ${k(reserve)}。${pending?'下次发送会先自动压缩，再调用模型。':'接近输入窗口上限时自动压缩。'}累计消耗 ${k(c.conversation_total_tokens || 0)}，已压缩 ${c.compressions || 0} 次。用量按字符估算，不是供应商真实计费；压缩不会清零累计消耗。`;
+}
+
+function renderGlobalExecution() {
+  renderGlobalContext();
+  const welcome = $('#globalWelcome');
+  const hasConversation = globalAgent.history.length || globalAgent.busy || globalAgent.answer || globalAgent.steps.length;
+  if (welcome) welcome.hidden = !!hasConversation;
+  const question = $('#globalQuestion');
+  if (question) { question.textContent = globalAgent.history.find(m=>m.role==='user' && m.round_index===globalAgent.currentRound)?.content || ''; question.hidden = !question.textContent; }
+  const status = $('#globalStatus');
+  if (status) status.textContent = globalAgent.status;
+  const process = $('#globalProcess');
+  if (process) { process.hidden = !hasConversation || (!globalAgent.busy && !globalAgent.timing && !globalAgent.steps.length && !globalAgent.selectedWorkbookIds.length); process.open = globalAgent.processExpanded; }
+  renderExecutionTime();
+  const count = $('#globalStepCount');
+  if (count) count.textContent = globalAgent.steps.length ? `${globalAgent.steps.length} 个步骤` : '';
+  const retry = $('#globalRetry');
+  if (retry) retry.hidden = globalAgent.status !== '执行失败' || !globalAgent.lastQuestion;
+  const steps = $('#globalSteps');
+  if (steps) {
+    steps.innerHTML = globalAgent.steps.map(s => `<details class="agent-step ${s.status || 'running'}" data-step="${esc(s.id)}" ${s.expanded ? 'open' : ''}><summary><span class="agent-step-dot"></span><span class="agent-step-label">${s.action ? `<code class="tool-name">${esc(s.action)}</code>` : ''}${globalActionLabel(s.action) !== s.action ? `<span class="tool-purpose">${esc(globalActionLabel(s.action))}</span>` : ''}</span><small>${s.status === 'done' ? '完成' : s.status === 'failed' ? '失败' : '执行中'}</small></summary><div class="agent-step-body">${globalStepBody(s.result || {sql:s.action_input?.sql,columns:[],rows:[]})}</div></details>`).join('');
+    steps.querySelectorAll('details').forEach(el => { el.ontoggle = () => { const s = globalAgent.steps.find(s=>s.id===el.dataset.step); if (s) s.expanded = el.open; }; });
+  }
+  const answer = $('#globalAnswer');
+  if (answer) {
+    answer.hidden = !globalAgent.answer && !globalAgent.busy;
+    answer.innerHTML = `<div class="message-content">${globalAgent.answer ? globalAnswerHtml(globalAgent.answer) : '<p class="muted" role="status">正在回复…</p>'}</div>`;
+    if(globalAgent.answer)answer.innerHTML+=answerTimestampHtml(globalAgent.timing,globalAgent.sources);
+  }
+  const report = $('#globalReport');
+  if (report) {
+    const r = globalAgent.report;
+    report.hidden = !r;
+    const reportKey = r?.report_id || '';
+    if (report.dataset.reportId !== reportKey) {
+      report.dataset.reportId = reportKey;
+      report.innerHTML = r ? `<details ${globalAgent.busy ? 'open' : ''}><summary><strong>${esc(r.title || '分析报告')}</strong><span>报告预览</span></summary><div class="agent-report-head"><a href="${esc(r.url)}" target="_blank" rel="noopener">打开报告 ↗</a>${globalAgent.capabilities?.pdf_available ? `<a href="${esc(r.url)}/pdf" target="_blank" rel="noopener">下载 PDF</a>` : ''}</div><iframe title="分析报告预览" class="agent-report-frame" sandbox="" ${r.html ? `srcdoc="${esc(r.html)}"` : `src="${esc(r.url)}"`}></iframe></details>` : '';
+    }
+  }
+}
+
+
+function renderMessage(message){const user=message.role==='user';return '<article class="history-message '+(user?'message-user':'message-assistant')+'" aria-label="'+(user?'你的消息':'助手回答')+'"><div class="message-content">'+(user?esc(message.content||'').replace(/\n/g,'<br>'):globalAnswerHtml(message.content||''))+'</div>'+(!user?answerTimestampHtml(message.meta?.timing,message.meta?.attachments||message.meta?.sources||[]):'')+'</article>';}
+async function refreshHistory(){globalAgent.conversations=await api('/agent/conversations');renderSidebar();}
+function renderSidebar(){
+ const search=$('#historySearch').value.toLowerCase();
+ $('#conversationList').innerHTML=globalAgent.conversations.filter(c=>(c.title||'').toLowerCase().includes(search)).map(c=>'<div class="conversation-row '+(c.conv_id===globalAgent.selectedConversationId?'active':'')+'"><button data-conversation="'+esc(c.conv_id)+'" title="'+esc(c.title||'新对话')+(c.pinned?' · 已置顶':'')+'" aria-haspopup="menu">'+esc(c.title||'新对话')+'</button></div>').join('')||'<p class="muted">暂无会话</p>';
+ $('#conversationList').querySelectorAll('[data-conversation]').forEach(b=>{
+  b.onclick=()=>{if(!locked())loadGlobalConversation(b.dataset.conversation).catch(e=>notice(e.message));};
+  b.oncontextmenu=e=>{e.preventDefault();showConversationMenu(b.dataset.conversation,e.clientX,e.clientY);};
+  b.onkeydown=e=>{if(e.key==='ContextMenu'||(e.shiftKey&&e.key==='F10')){e.preventDefault();const r=b.getBoundingClientRect();showConversationMenu(b.dataset.conversation,r.left,r.bottom);}};
+ });
+}
+function closeConversationMenu(){document.querySelector('#conversationMenu')?.remove();}
+function confirmConversationDeletion(conversation){
+ const dialog=$('#deleteConversationDialog');$('#deleteConversationName').textContent=conversation.title||'新对话';dialog.returnValue='';
+ return new Promise(resolve=>{dialog.addEventListener('close',()=>resolve(dialog.returnValue==='delete'),{once:true});dialog.showModal();});
+}
+function showConversationMenu(id,x,y){
+ closeConversationMenu();if(locked())return;
+ const c=globalAgent.conversations.find(c=>c.conv_id===id);if(!c)return;
+ const menu=document.createElement('div');menu.id='conversationMenu';menu.setAttribute('role','menu');
+ // Keep the cursor menu out of the flex layout even with an older cached CSS file.
+ Object.assign(menu.style,{position:'fixed',zIndex:'1000',display:'grid',minWidth:'170px',background:'#fff',padding:'6px',border:'1px solid #e4e9ec',borderRadius:'12px',boxShadow:'0 8px 30px #18252d20'});
+ menu.innerHTML='<button role="menuitem" data-action="rename">重命名</button><button role="menuitem" data-action="pin">'+(c.pinned?'取消置顶':'置顶')+'</button><button role="menuitem" data-action="delete" class="danger">删除</button>';
+ document.body.appendChild(menu);menu.style.left=Math.max(8,Math.min(x+4,window.innerWidth-menu.offsetWidth-8))+'px';menu.style.top=Math.max(8,Math.min(y+4,window.innerHeight-menu.offsetHeight-8))+'px';
+ menu.querySelectorAll('button').forEach(b=>b.onclick=async()=>{
+  closeConversationMenu();if(locked())return;
+  try{
+   if(b.dataset.action==='delete'){if(!await confirmConversationDeletion(c)||locked())return;const result=await api('/agent/conversations/'+id,{method:'DELETE'});if(id===globalAgent.selectedConversationId)await loadGlobalConversation('');(result.cleanup_warnings||[]).forEach(notice);}
+   else{let values;if(b.dataset.action==='pin')values={pinned:!c.pinned};else{const title=prompt('会话名称',c.title);if(!title?.trim())return;values={title:title.trim().slice(0,80)};}
+    await api('/agent/conversations/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});if(values.title&&id===globalAgent.selectedConversationId)$('#conversationTitle').textContent=values.title;}
+   await refreshHistory();
+  }catch(e){notice(e.message);}
+ });menu.querySelector('button').focus();
+ menu.onkeydown=e=>{const buttons=[...menu.querySelectorAll('button')],i=buttons.indexOf(document.activeElement);if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();buttons[(i+(e.key==='ArrowDown'?1:buttons.length-1))%buttons.length].focus();}};
+}
+document.addEventListener('pointerdown',e=>{if(!e.target.closest('#conversationMenu'))closeConversationMenu();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeConversationMenu();});
+window.addEventListener('resize',closeConversationMenu);
+function locked(){return globalAgent.busy||globalAgent.uploading;}
+function syncControls(){const lock=locked();['#globalAskBtn','#globalUpload','#globalModel','#newChat','#fileInput'].forEach(s=>$(s).disabled=lock);$('#globalInput').disabled=globalAgent.busy;}
+async function ensureConversation(){if(!globalAgent.selectedConversationId){const c=await api('/agent/conversations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'新对话'})});globalAgent.selectedConversationId=c.conv_id;await refreshHistory();}return globalAgent.selectedConversationId;}
+function renderAttachments(){
+ const selected=new Set(globalAgent.selectedWorkbookIds);
+ $('#attachmentChips').innerHTML=globalAgent.attachments.map(a=>'<div class="attachment-chip"><span>▤ '+esc(a.filename)+'</span><small>'+esc(({ready:'可提问',needs_review:'需确认',blocked:'需修正',processing:'处理中',failed:'失败'})[a.status]||a.status)+'</small>'+(a.status==='needs_review'||a.status==='blocked'?'<button data-review="'+esc(a.import_id)+'">查看问题</button>':'')+'<button data-remove="'+esc(a.import_id)+'" aria-label="移除附件" '+(locked()?'disabled':'')+'>×</button></div>').join('');
+ $('#globalSources').innerHTML=globalAgent.attachments.filter(a=>a.status==='ready').map(a=>'<label><input type="checkbox" value="'+esc(a.workbook_id)+'" '+(selected.has(a.workbook_id)?'checked':'')+' '+(locked()?'disabled':'')+'>'+esc(a.filename)+'</label>').join('')||'<p>请添加附件</p>';
+ $('#scopeLabel').textContent=selected.size?selected.size+' 个附件':'通用问答';
+ $('#globalSources').onchange=()=>{globalAgent.selectedWorkbookIds=[...$('#globalSources').querySelectorAll('input:checked')].map(e=>e.value);$('#scopeLabel').textContent=globalAgent.selectedWorkbookIds.length?globalAgent.selectedWorkbookIds.length+' 个附件':'通用问答';};
+ $('#attachmentChips').querySelectorAll('[data-review]').forEach(b=>b.onclick=()=>showReview(globalAgent.attachments.find(a=>a.import_id===b.dataset.review)));
+ $('#attachmentChips').querySelectorAll('[data-remove]').forEach(b=>b.onclick=()=>removeAttachment(b.dataset.remove));
+}
+async function removeAttachment(id){if(locked())return;try{const result=await api('/agent/conversations/'+globalAgent.selectedConversationId+'/attachments/'+id,{method:'DELETE'});const a=globalAgent.attachments.find(a=>a.import_id===id);globalAgent.attachments=globalAgent.attachments.filter(a=>a.import_id!==id);globalAgent.selectedWorkbookIds=globalAgent.selectedWorkbookIds.filter(w=>w!==a?.workbook_id);renderAttachments();(result.cleanup_warnings||[]).forEach(notice);}catch(e){notice(e.message);}}
+function showReview(a){
+ const dialog=$('#reviewDialog');$('#reviewFilename').textContent=a.filename;
+ $('#reviewIssues').innerHTML=[...(a.errors||[]),...(a.severe_warnings||[])].map(i=>'<p>'+esc(i.message)+'</p>').join('');
+ $('#reviewAccept').hidden=!!a.errors?.length;$('#reviewAccept').disabled=locked();
+ $('#reviewCancel').onclick=async()=>{dialog.close();await removeAttachment(a.import_id);};
+ $('#reviewAccept').onclick=async()=>{if(locked())return;$('#reviewAccept').disabled=true;globalAgent.uploading=true;syncControls();try{const updated=await api('/agent/conversations/'+globalAgent.selectedConversationId+'/attachments/'+a.import_id+'/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:a.revision,accept_severe_warnings:true})});Object.assign(a,updated);if(a.status==='ready')globalAgent.selectedWorkbookIds.push(a.workbook_id);dialog.close();}catch(e){notice(e.message);}finally{globalAgent.uploading=false;syncControls();renderAttachments();}};
+ if(!dialog.open)dialog.showModal();
+}
+async function uploadFiles(files){
+ if(locked())return;
+ const list=[...files];if(list.some(f=>! /\.(xlsx|xlsm|csv)$/i.test(f.name)))return notice('支持 XLSX、XLSM、CSV 文件。');
+ globalAgent.uploading=true;syncControls();
+ try{
+  const id=await ensureConversation();
+  for(const file of list){
+   const pending={import_id:'upload-'+Date.now(),filename:file.name,status:'processing'};globalAgent.attachments.push(pending);renderAttachments();
+   try{const form=new FormData();form.append('file',file);const a=await api('/agent/conversations/'+id+'/attachments',{method:'POST',body:form});Object.assign(pending,a);if(a.status==='ready')globalAgent.selectedWorkbookIds.push(a.workbook_id);}
+   catch(e){globalAgent.attachments=globalAgent.attachments.filter(a=>a!==pending);notice(file.name+'：'+e.message);}
+   renderAttachments();
+  }
+ }catch(e){notice(e.message);}finally{globalAgent.uploading=false;syncControls();renderAttachments();$('#fileInput').value='';const review=globalAgent.attachments.find(a=>['needs_review','blocked'].includes(a.status));if(review)showReview(review);}
+}
+async function loadGlobalConversation(id){
+ stopExecutionTimer();globalAgent.timing=null;
+ globalAgent.selectedConversationId=id;globalAgent.draft='';$('#globalInput').value='';$('#globalPast').innerHTML='';$('#globalNotices').innerHTML='';$('#connectionStatus').textContent='';
+ const d=id?await api('/agent/conversations/'+id):{messages:[],scope:{},title:'新对话'};
+ globalAgent.history=d.messages||[];globalAgent.attachments=d.scope.attachments||[];
+ globalAgent.history.forEach(m=>{if(!['ai','assistant'].includes(m.role)||m.meta?.attachments)return;const found=new Map();globalAgent.history.filter(t=>t.round_index===m.round_index&&t.role==='tool').forEach(t=>{const detail=t.meta?.detail||{},r=detail.result||detail;if(r.source?.workbook_id)found.set(r.source.workbook_id,r.source);if(detail.type==='scope.resolved'||(detail.type==='step.done'&&detail.action==='html_interpreter'))(r.sources||[]).forEach(s=>found.set(s.workbook_id,s));});m.meta={...m.meta,attachments:[...found.values()]};});
+ // Older conversations remain readable; expose their selected sources as attachments.
+ if(!('attachments' in d.scope)){const catalog=id?await api('/data-catalog'):[];globalAgent.attachments=catalog.filter(c=>(d.scope.workbook_ids||[]).includes(c.workbook_id)).map(c=>({filename:c.display_name,workbook_id:c.workbook_id,import_id:c.import_id||c.workbook_id,status:'ready',legacy:true}));}
+ globalAgent.selectedWorkbookIds=d.scope.workbook_ids||[];globalAgent.model=d.model_name||'';globalAgent.context=d.context||null;
+ globalAgent.currentRound=Math.max(0,...globalAgent.history.map(m=>m.round_index||0));
+ const current=globalAgent.history.filter(m=>m.round_index===globalAgent.currentRound);
+ globalAgent.steps=current.filter(m=>m.meta?.detail?.type==='step.done').map(m=>({...m.meta.detail,expanded:false}));
+ globalAgent.report=[...globalAgent.steps].reverse().find(s=>s.result?.report_id)?.result||null;
+ globalAgent.answer=[...current].reverse().find(m=>m.role==='ai')?.content||'';
+ globalAgent.timing=[...current].reverse().find(m=>m.role==='ai')?.meta?.timing||null;
+ globalAgent.sources=[...current].reverse().find(m=>m.role==='ai')?.meta?.attachments||globalAgent.report?.sources||d.sources||[];globalAgent.status=id?'历史执行记录':'准备就绪';globalAgent.processExpanded=false;
+ $('#conversationTitle').textContent=d.title||'新对话';
+ $('#globalModel').value=globalAgent.models.some(m=>m.name===globalAgent.model)?globalAgent.model:'';
+ $('#globalPast').innerHTML=globalAgent.history.filter(m=>['user','ai','assistant'].includes(m.role)&&m.round_index!==globalAgent.currentRound).map(renderMessage).join('');
+ renderAttachments();renderSidebar();renderGlobalExecution();
+}
+function handleEvent(ev){
+ if(ev.type==='session'){globalAgent.selectedConversationId=ev.conv_id||globalAgent.selectedConversationId;}
+ if(ev.type==='context.usage'||ev.type==='context.compacted'){globalAgent.context=ev.context;renderGlobalContext();return;}
+ if(ev.type==='step.start'){globalAgent.steps.push({...ev,status:'running',expanded:false});globalAgent.status=globalActionLabel(ev.action)+'…';}
+ if(ev.type==='step.done'){const s=globalAgent.steps.find(s=>s.id===ev.id);if(s)Object.assign(s,ev);else globalAgent.steps.push({...ev,expanded:false});globalAgent.history.push({role:'tool',round_index:globalAgent.currentRound,meta:{detail:ev}});}
+ if(ev.type==='html')globalAgent.report=ev;
+ if(ev.type==='answer.delta'){globalAgent.answer+=ev.text||'';globalAgent.status=ev.analysis_route==='agent'?'正在回答 · 数据分析':'正在回答 · 通用问答';}
+ if(ev.type==='status')globalAgent.status=ev.message||'正在分析';
+ if(ev.type==='done'){stopExecutionTimer(ev.timing);globalAgent.answer=ev.full_answer||'';globalAgent.sources=ev.attachments||ev.sources||[];globalAgent.history.push({role:'ai',content:globalAgent.answer,round_index:globalAgent.currentRound,meta:{timing:globalAgent.timing,attachments:globalAgent.sources}});globalAgent.status=ev.partial?'完成 · 部分来源失败':'已完成';globalAgent.processExpanded=false;}
+ if(ev.type==='error'){stopExecutionTimer();notice(ev.error||'执行失败');globalAgent.status='执行失败';globalAgent.processExpanded=false;globalAgent.steps.filter(s=>s.status==='running').forEach(s=>{s.status='failed';s.result={error:ev.error};});}
+ renderGlobalExecution();
+}
+async function doGlobalAsk(){
+ $('#globalNotices').innerHTML='';$('#connectionStatus').textContent='';
+ const question=$('#globalInput').value.trim();if(!question||locked())return;
+ try{
+  const id=await ensureConversation();globalAgent.busy=true;syncControls();globalAgent.lastQuestion=question;
+  startExecutionTimer();
+  if(!globalAgent.history.some(m=>m.role==='user'))$('#conversationTitle').textContent=question.slice(0,80);
+  $('#globalInput').value='';globalAgent.draft='';
+  $('#globalPast').innerHTML=globalAgent.history.filter(m=>['user','ai'].includes(m.role)).map(renderMessage).join('');
+  globalAgent.currentRound=Math.max(0,...globalAgent.history.map(m=>m.round_index||0))+1;globalAgent.steps=[];globalAgent.report=null;globalAgent.answer='';globalAgent.sources=[];globalAgent.status='正在连接模型…';globalAgent.processExpanded=true;
+  globalAgent.history.push({role:'user',content:question,round_index:globalAgent.currentRound});renderGlobalExecution();
+  const r=await fetch(API+'/agent/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question,conv_id:id,model:$('#globalModel').value||null,scope:{mode:'selected',workbook_ids:globalAgent.selectedWorkbookIds},max_rows:500})});
+  if(!r.ok||!r.body)throw Error('HTTP '+r.status+': '+(await r.text()).slice(0,200));
+  const reader=r.body.getReader(),decoder=new TextDecoder();let buf='',terminal=false;
+  const dispatch=line=>{if(!line.startsWith('data:'))return;const ev=JSON.parse(line.slice(5).trim());if(['done','error'].includes(ev.type))terminal=true;handleEvent(ev);};
+  while(true){const chunk=await reader.read();if(chunk.done)break;buf+=decoder.decode(chunk.value,{stream:true});const lines=buf.split(/\r?\n/);buf=lines.pop()||'';lines.forEach(dispatch);}
+  buf+=decoder.decode();buf.split(/\r?\n/).forEach(dispatch);if(!terminal)throw Error('连接中断，未收到完成事件');
+ }catch(e){notice(e.message);globalAgent.status='执行失败';}finally{stopExecutionTimer();globalAgent.busy=false;globalAgent.processExpanded=false;$('#globalReport > details')?.removeAttribute('open');syncControls();renderAttachments();renderGlobalExecution();await refreshHistory().catch(e=>notice(e.message));}
+}
+$('#globalUpload').onclick=()=>$('#fileInput').click();
+$('#fileInput').onchange=e=>uploadFiles(e.target.files);
+$('#globalAskBtn').onclick=doGlobalAsk;
+$('#globalRetry').onclick=()=>{$('#globalInput').value=globalAgent.lastQuestion||'';doGlobalAsk();};
+$('#globalInput').oninput=e=>{globalAgent.draft=e.target.value;renderGlobalContext();};
+$('#globalInput').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();doGlobalAsk();}};
+$('#newChat').onclick=()=>{if(!locked())loadGlobalConversation('');};
+$('#historySearch').oninput=renderSidebar;
+$('#toggleSidebar').onclick=()=>document.body.classList.toggle('sidebar-collapsed');
+$('#globalModel').onchange=e=>{globalAgent.model=e.target.value;renderGlobalContext();};
+['dragenter','dragover'].forEach(type=>$('#composer').addEventListener(type,e=>{if(e.dataTransfer.types.includes('Files')){e.preventDefault();$('#composer').classList.add('dragging');}}));
+$('#composer').addEventListener('dragleave',e=>{if(!$('#composer').contains(e.relatedTarget))$('#composer').classList.remove('dragging');});
+$('#composer').addEventListener('drop',e=>{e.preventDefault();$('#composer').classList.remove('dragging');uploadFiles(e.dataTransfer.files);});
+document.addEventListener('dragover',e=>{if(e.dataTransfer.types.includes('Files'))e.preventDefault();});
+document.addEventListener('drop',e=>{if(e.dataTransfer.types.includes('Files'))e.preventDefault();});
+async function init(){try{[globalAgent.models,globalAgent.capabilities]=await Promise.all([api('/models'),api('/capabilities')]);$('#globalModel').innerHTML='<option value="">默认模型</option>'+globalAgent.models.map(m=>'<option value="'+esc(m.name)+'">'+esc(m.label||m.name)+'</option>').join('');await refreshHistory();renderAttachments();renderGlobalExecution();}catch(e){notice(e.message);}}
+init();
+</script></body></html>
+

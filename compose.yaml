@@ -1,0 +1,22 @@
+services:
+  excel-agent:
+    build: .
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      EXCEL_REQUIRE_AUTH: "false"
+      EXCEL_LLM_BASE_URL: ${EXCEL_LLM_BASE_URL:-https://api.deepseek.com/v1}
+      EXCEL_LLM_MODEL: ${EXCEL_LLM_MODEL:-deepseek-flash}
+      EXCEL_LLM_API_KEY: ${EXCEL_LLM_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      MODELSCOPE_API_KEY: ${MODELSCOPE_API_KEY:-}
+    volumes:
+      - excel-data:/data
+    restart: unless-stopped
+    init: true
+    mem_limit: 2g
+    cpus: 2
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  excel-data:

@@ -1,0 +1,13 @@
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 EXCEL_HOST=0.0.0.0 EXCEL_STORAGE_PATH=/data EXCEL_REQUIRE_AUTH=false
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 libgdk-pixbuf-2.0-0 shared-mime-info fonts-noto-cjk && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt && useradd --uid 10001 --create-home excel && mkdir /data && chown excel:excel /data
+COPY app ./app
+COPY examples/frontend ./examples/frontend
+COPY config.yaml run.py ./
+USER excel
+EXPOSE 8090
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/v1/health', timeout=3)"
+CMD ["python", "run.py"]
