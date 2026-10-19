@@ -110,6 +110,7 @@ def build_catalog_payload(
                 columns.append(
                     {
                         "physical_name": physical_name,
+                        "source_column": column.get('source_column'),
                         "display_name": _text(
                             column.get("display_name") or physical_name, 300
                         ),
@@ -155,7 +156,8 @@ def build_catalog_payload(
     catalog_text = " ".join(item for item in text_parts if item)
     return {
         "payload": payload,
-        "catalog_json": encoded[:MAX_TEXT_CHARS],
+        # Text search may be clipped; structured JSON must remain decodable.
+        "catalog_json": encoded,
         "catalog_text": catalog_text[:MAX_TEXT_CHARS],
         "schema_digest": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
     }

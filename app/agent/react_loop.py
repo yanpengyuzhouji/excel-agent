@@ -11,6 +11,8 @@ max_loops.
 """
 
 from __future__ import annotations
+
+from ..service.llm import LLMRequestError, llm_error_event
 from .loop_guard import ToolLoopGuard, LOOP_REMINDER, LOOP_ERROR
 
 import json
@@ -36,7 +38,7 @@ _ACTION_INPUT_RE = re.compile(
     r"Action\s*Input\s*:\s*", re.IGNORECASE
 )
 _XML_TOOL_RE = re.compile(
-    r"<(?P<action>sql_query|html_interpreter|todowrite|terminate|search_workbooks|inspect_workbook|query_workbook|aggregate_results|observe_execution|verify_record_count)\b[^>]*>"
+    r"<(?P<action>define_analysis|sql_query|html_interpreter|todowrite|terminate|search_workbooks|inspect_workbook|query_workbook|aggregate_results|observe_execution|verify_record_count)\b[^>]*>"
     r"(?P<payload>.*?)</(?P=action)>",
     re.IGNORECASE | re.DOTALL,
 )
@@ -258,7 +260,8 @@ def _parse_xml_tool_call(text: str) -> Tuple[Optional[str], Dict[str, Any]]:
 
 def has_tool_protocol(value: Any) -> bool:
     text = strip_private_reasoning(value)
-    return bool(re.search(r'(?im)(^\s*(?:Action(?:\s*Input)?|Tool|Observation)\s*:|<\s*/?\s*(?:[｜|]+DSML[｜|]+|tool_calls?\b|invoke\b|parameter\b|query_workbook\b|sql_query\b|html_interpreter\b|todowrite\b|terminate\b))', text))
+    return bool(re.search(r'(?im)(^\s*(?:Action(?:\s*Input)?|Tool|Observation)\s*:|<\s*/?\s*(?:[｜|]+DSML[｜|]+|tool_calls?\b|invoke\b|parameter\b|query_workbook\b|sql_query\b|html_interpreter\b|todowrite\b|terminate\b))', text)
+                or re.search(r'(?i)"(?:action|action_input|action input)"\s*:',text))
 
 
 def _parse_dsml(text: str) -> Tuple[Optional[str], Dict[str, Any]]:
@@ -300,6 +303,37 @@ def parse_react(reply: str) -> Tuple[Optional[str], Dict[str, Any]]:
     # Parse only the visible response so an Action mentioned in private
     # reasoning cannot be mistaken for the actual tool call.
     visible_reply = strip_private_reasoning(reply)
+    candidate=re.sub(r'^```(?:json)?\s*|\s*```$','',visible_reply.strip(),flags=re.I)
+    try:
+        envelope=json.loads(candidate)
+    except (ValueError,TypeError):
+        envelope=None
+    if isinstance(envelope,dict):
+        fields={re.sub(r'[\s_-]','',str(k)).casefold():v for k,v in envelope.items()}
+        name=fields.get('action')
+        arguments=fields.get('actioninput',fields.get('arguments',{}))
+        if isinstance(arguments,str):
+            try:arguments=json.loads(arguments)
+            except ValueError:arguments=None
+        if isinstance(name,str) and re.fullmatch(r'[a-z_]+',name.lower()) and isinstance(arguments,dict):
+            arguments=dict(arguments)
+            promoted=[]
+            for key in ('workbook_id','sql','table_name','table_names','columns','query',
+                        'result_id','result_ids','offset','limit','operation','group_by',
+                        'value_column','weight_column','baseline','current','numerator','denominator',
+                        'left_result_id','right_result_id','left_key','right_key','html','title','result','todos',
+                        'tasks','mode','message','evidence_ids','bindings'):
+                root_key=re.sub(r'[\s_-]','',key).casefold()
+                if root_key not in fields:
+                    continue
+                if key in arguments and arguments[key]!=fields[root_key]:
+                    return None,{}
+                if key not in arguments:
+                    arguments[key]=fields[root_key]
+                    promoted.append(key)
+            if promoted:
+                logger.info('tool_envelope_normalized action=%s promoted=%s',name.lower(),','.join(promoted))
+            return name.lower(),arguments
     if re.search(r'<[｜|]+DSML[｜|]+',visible_reply,re.I):
         return _parse_dsml(visible_reply)
     action_match = _ACTION_RE.search(visible_reply)
@@ -517,6 +551,8 @@ def run_react(
         try:
             budget.before_llm(messages)
             logger.info("react llm start round=%d/%d", round_num, max_loops)
+            llm.request_phase, llm.agent_round = 'agent_control', round_num
+            llm.retry_budget=budget
             reply = llm.generate_chat(messages)
             budget.after_llm(reply)
             logger.info(
@@ -529,8 +565,9 @@ def run_react(
             yield {"type": "error", "error": str(exc), "done": True}
             return
         except Exception as exc:
-            logger.exception("react llm failed round=%d/%d", round_num, max_loops)
-            yield {"type": "error", "error": f"LLM call failed: {exc}", "done": True}
+            if not isinstance(exc, LLMRequestError):
+                logger.exception("react llm failed round=%d/%d", round_num, max_loops)
+            yield llm_error_event(exc)
             return
 
         action, action_input = parse_react(reply)

@@ -22,7 +22,7 @@ server:
   max_import_bytes: 209715200   # 200 MB, reject uploads over this
   max_import_rows: 100000       # per-sheet logical row limit
   max_import_columns: 512       # per-sheet column limit
-  max_import_cells: 2000000     # rectangular grid cells across all sheets
+  max_import_cells: 600000      # conservative single-instance release envelope
   max_cell_chars: 32767         # Excel-compatible per-cell text ceiling
   max_total_text_chars: 67108864 # text retained in a draft across all sheets
   max_uncompressed_bytes: 268435456 # total OOXML ZIP expanded bytes (256 MB)
@@ -30,11 +30,11 @@ server:
   max_zip_entries: 10000
   max_merged_cells: 200000      # maximum expanded cells across merge ranges
   max_xml_entry_bytes: 67108864 # reject a single XML part over 64 MB
-  max_concurrent_imports: 2     # reject excess parse jobs; do not queue unbounded work
+  max_concurrent_imports: 2     # bound peak import memory; excess work must queue upstream
   sql_timeout_ms: 5000          # wall-clock ceiling for one SQLite statement
   sql_vm_steps: 2000000         # approximate SQLite VM instruction ceiling
   max_concurrent_sql: 4
-  max_concurrent_agent_runs: 2
+  max_concurrent_agent_runs: 10
 
 excel:
   # Default can be overridden by EXCEL_LLM_BASE_URL / MODEL / API_KEY.
@@ -48,9 +48,73 @@ excel:
     temperature: 0.1
     max_tokens: 8192
     timeout: 90
+    first_token_timeout: 10
     max_retries: 0
     provider: deepseek
+    structured_control: true
   llms:
+    - &bailian_llm
+      name: deepseek-v4-flash-0731-bailian
+      label: DeepSeek V4 Flash 0731 (阿里百炼)
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: deepseek-v4-flash-0731
+      api_key_env: BAILIAN_QWEN37_API_KEY
+      env_file: .env.bailian
+      temperature: 0.1
+      max_tokens: 8192
+      timeout: 90
+      first_token_timeout: 10
+      max_retries: 0
+      provider: bailian
+      structured_control: true
+      extra_body:
+        enable_thinking: false
+    - <<: *bailian_llm
+      name: kimi-k3-bailian
+      label: Kimi K3 (阿里百炼)
+      model: kimi-k3
+      temperature: 1
+    - <<: *bailian_llm
+      name: glm-5.3-bailian
+      label: GLM 5.3 (阿里百炼 · 备用)
+      model: glm-5.3
+      first_token_timeout: 30
+      extra_body:
+        enable_thinking: true
+    - <<: *bailian_llm
+      name: deepseek-v4-pro-0813-bailian
+      label: DeepSeek V4 Pro 0813 (阿里百炼)
+      model: deepseek-v4-pro-0813
+    - <<: *bailian_llm
+      name: qwen3.8-max-0902-bailian
+      label: Qwen3.8 Max 0902 (阿里百炼)
+      model: qwen3.8-max-0902
+    - <<: *bailian_llm
+      name: qwen3.8-flash-bailian
+      label: Qwen3.8 Flash (阿里百炼)
+      model: qwen3.8-flash
+    - <<: *bailian_llm
+      name: deepseek-v4.1-flash-bailian
+      label: DeepSeek V4.1 Flash (阿里百炼)
+      model: deepseek-v4.1-flash
+    - <<: *bailian_llm
+      name: qwen3.8-max-bailian
+      label: Qwen3.8 Max (阿里百炼)
+      model: qwen3.8-max
+    - name: qwen3.7-flash-bailian
+      label: Qwen3.7 Flash (阿里百炼)
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model: qwen3.7-flash
+      api_key_env: BAILIAN_QWEN37_API_KEY
+      env_file: .env.bailian
+      temperature: 0.1
+      max_tokens: 8192
+      timeout: 90
+      max_retries: 0
+      provider: bailian
+      structured_control: true
+      extra_body:
+        enable_thinking: false
     # Retain the old selector name for existing conversations, use the live model ID.
     - name: deepseek-v4-flash
       label: DeepSeek Flash

@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .api.endpoints import router
+from . import __version__
 from .api.attachments import router as attachments_router
 from .config import build_app_config
 from .db import ensure_tables
@@ -88,7 +89,7 @@ app = FastAPI(
         "Session Excel attachments -> automatic validated SQLite import -> "
         "multi-workbook read-only analysis and optional HTML reports"
     ),
-    version="1.1.0",
+    version=__version__,
     lifespan=lifespan,
 )
 

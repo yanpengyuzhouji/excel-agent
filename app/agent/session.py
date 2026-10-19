@@ -163,7 +163,7 @@ class AgentConversation:
                 result.append({"role": "assistant", "content": message["content"]})
             elif role == "tool":
                 detail = (message.get('meta') or {}).get('detail') or {}
-                if detail.get('type') == 'catalog.candidates':
+                if detail.get('type') in {'catalog.candidates', 'publication.reviewed', 'analysis.rejected', 'numeric.observed', 'numeric.validated'}:
                     continue
                 if message['round_index'] in completed_rounds and detail.get('type') in {'source.inspect','source.query.result','source.query.error','aggregate.result'}:
                     continue
@@ -176,6 +176,10 @@ class AgentConversation:
                 if detail.get('type') == 'source.query.result':
                     entry['evidence'] = detail
                 elif detail.get('type') == 'step.done' and detail.get('action') in {'query_workbook','sql_query','verify_record_count'} and detail.get('status') == 'done':
+                    entry['evidence'] = detail.get('result') or {}
+                elif detail.get('type') == 'aggregate.result':
+                    entry['evidence'] = detail
+                elif detail.get('type') == 'step.done' and detail.get('action') == 'aggregate_results' and detail.get('status') == 'done':
                     entry['evidence'] = detail.get('result') or {}
                 if message.get('index',0) <= cutoff:
                     if entry.get('evidence'):

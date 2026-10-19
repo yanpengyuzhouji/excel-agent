@@ -27,7 +27,9 @@ def run_general_chat(llm, question, history, budget, total_tokens=32000,
     yield {'type': 'context.usage', 'context': window.state(messages)}
     yield {'type': 'status', 'message': '正在回答 · 通用问答', 'analysis_route': 'general'}
     budget.before_llm(messages)
+    llm.retry_budget=budget
     parts = []
+    llm.request_phase = 'general_chat'
     for part in llm.generate_chat_stream(messages):
         parts.append(part)
         budget._check_time()

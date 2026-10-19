@@ -34,7 +34,7 @@ from ..analysis.profile import build_workbook_profile
 from ..analysis.routing import select_analysis_route
 from ..conversation import ExcelWorkbookConversation
 from ..core import blocking_func_to_async, http_error
-from ..service.llm import ExcelLLM
+from ..service.llm import ExcelLLM, LLMRequestError, llm_error_event
 from ..service.service import WorkbookImportService
 from ..service.upload_stream import spool_upload
 from ..security import AuthConfigurationError, AuthenticationError
@@ -268,7 +268,8 @@ def prepare_conversation_turn(
 
 @router.get("/health")
 async def health():
-    return {"status": "ok"}
+    from .. import __version__
+    return {"status": "ok", "version":__version__}
 
 
 @router.post("/workbook-imports", response_model=WorkbookImportResponse)
@@ -561,6 +562,7 @@ async def ask_workbook(
             service.config.agent, prior=conv.get_budget_usage()
         )
         llm.deadline = budget.started + budget.max_seconds
+        llm.conversation_id = conv.conv_id
         service.bind_agent_run(run_id, conv.conv_id, [workbook_id])
         run_id = conv.conv_id
     except Exception as exc:
@@ -666,9 +668,10 @@ async def ask_workbook(
                             logger.exception("Failed to persist final answer")
                 yield _sse(event)
         except Exception as exc:
-            logging.getLogger(__name__).exception("ask failed")
+            if not isinstance(exc, LLMRequestError):
+                logging.getLogger(__name__).exception("ask failed")
             yield _sse({
-                "type": "error", "error": str(exc), "done": True,
+                **llm_error_event(exc),
                 "conv_id": conv.conv_id,
                 "model_name": model_context["model_name"],
                 "model_label": model_context["model_label"],
@@ -970,6 +973,7 @@ async def ask_multi_workbook(
             history = []
         budget = AgentBudget.from_config(service.config.agent, prior=conv.get_budget_usage())
         llm.deadline = budget.started + budget.max_seconds
+        llm.conversation_id = conv.conv_id
         service.bind_agent_run(run_id, conv.conv_id, request.scope.workbook_ids)
         run_id = conv.conv_id
         scope = request.scope.model_dump()
@@ -1019,6 +1023,20 @@ async def ask_multi_workbook(
     def generate():
         last_context = None
         answer_attachments = []
+        finalized = False
+        def finalize():
+            nonlocal finalized
+            if finalized:
+                return
+            finalized = True
+            try:
+                if last_context:
+                    conv.add_context_usage(last_context)
+                conv.add_budget_usage(budget.conversation_usage())
+            except Exception:
+                logger.exception('Failed to persist multi-workbook budget')
+            finally:
+                service.release_agent_run(run_id)
         try:
             yield _sse({
                 "type": "session",
@@ -1072,6 +1090,12 @@ async def ask_multi_workbook(
                     "source.query.result",
                     "source.query.error",
                     "aggregate.result",
+                    "numeric.validated",
+                    "numeric.observed",
+                    "analysis.planned",
+                    "analysis.resolved",
+                    "analysis.rejected",
+                    "publication.reviewed",
                     "catalog.candidates",
                     "step.done",
                 }:
@@ -1085,6 +1109,7 @@ async def ask_multi_workbook(
                               'completed_at': datetime.now(timezone.utc).isoformat()}
                     if event.get("full_answer"):
                         conv.add_ai(event["full_answer"], meta={'timing': timing, 'attachments': answer_attachments,
+                            'analysis': event.get('analysis'), 'publication': event.get('publication'),
                             'sources': event.get('sources') or []})
                     event = {
                         **event,
@@ -1094,24 +1119,22 @@ async def ask_multi_workbook(
                         "analysis_route": "agent",
                         **model_context,
                     }
+                if event.get('type') in {'done', 'error'}:
+                    finalize()
+                    yield _sse(event)
+                    return
                 yield _sse(event)
         except Exception as exc:
-            logger.exception("multi-workbook ask failed")
+            if not isinstance(exc, LLMRequestError):
+                logger.exception("multi-workbook ask failed")
+            finalize()
             yield _sse({
-                "type": "error",
-                "error": str(exc),
-                "done": True,
+                **llm_error_event(exc),
                 "analysis_route": "agent",
                 **model_context,
             })
         finally:
-            try:
-                if last_context:
-                    conv.add_context_usage(last_context)
-                conv.add_budget_usage(budget.conversation_usage())
-            except Exception:
-                logger.exception('Failed to persist multi-workbook budget')
-            service.release_agent_run(run_id)
+            finalize()
 
     return StreamingResponse(
         generate(),

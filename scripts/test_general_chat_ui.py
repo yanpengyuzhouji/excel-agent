@@ -49,7 +49,8 @@ with sync_playwright() as p:
         page.locator('#globalAskBtn').click()
         page.locator('#globalAnswer').get_by_text('你好，可以直接问我一般问题。').wait_for()
         assert asks[0]['scope'] == {'mode': 'selected', 'workbook_ids': []}
-        assert page.locator('#globalProcess').is_visible() is False
+        assert page.locator('#globalProcess').is_visible()
+        assert page.locator('#globalProcess').get_attribute('open') is None
         assert page.locator('#globalQuestion').evaluate("e=>getComputedStyle(e).backgroundColor") != page.locator('#globalAnswer').evaluate("e=>getComputedStyle(e).backgroundColor")
         assert page.locator('#globalQuestion').bounding_box()['x'] > page.locator('#globalAnswer').bounding_box()['x']
         page.locator('#globalInput').fill('你可以回答什么问题？')
@@ -59,6 +60,7 @@ with sync_playwright() as p:
         page.wait_for_function("!document.querySelector('#globalAskBtn').disabled")
         page.locator('#conversationList [data-conversation]').click()
         page.locator('#globalPast .message-user').wait_for()
+        page.wait_for_function("!globalAgent.loading")
         assert page.locator('#globalPast .message-assistant').count() == 1
         assert page.locator('#conversationList .conversation-row button').count() == 1
         title = page.locator('#conversationList [data-conversation]')

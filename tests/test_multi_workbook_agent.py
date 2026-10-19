@@ -83,8 +83,8 @@ class CatalogBuilderTests(unittest.TestCase):
 
 class MultiWorkbookAgentTests(unittest.TestCase):
     def test_final_answer_streams_after_query_without_exposing_terminate(self):
-        replies = iter(['Action: query_workbook\nAction Input: {"workbook_id":"a","sql":"SELECT 7 AS total"}',
-                        'Action: terminate\nAction Input: {"result":"总额7万元"}'])
+        replies = iter(['Action: query_workbook\nAction Input: {"workbook_id":"a","sql":"SELECT SUM(amount) AS total FROM table_1"}',
+                        'Action: terminate\nAction Input: {"result":"总额{{result-1:0:total}}万元"}'])
         streamed_messages = []
         stream_finished = []
         class LLM:
@@ -109,9 +109,10 @@ class MultiWorkbookAgentTests(unittest.TestCase):
         deltas = ''.join(e['text'] for e in events if e['type']=='answer.delta')
         self.assertEqual(events[-1]['full_answer'], deltas)
         self.assertNotIn('Action:', deltas)
-        self.assertEqual(budget.llm_calls, 3)
+        self.assertEqual(budget.llm_calls, 2)
         self.assertEqual(budget.sql_calls, 1)
-        self.assertIn('[[7]]', json.dumps(streamed_messages, ensure_ascii=False))
+        self.assertFalse(streamed_messages, 'Validated numeric answers must not be rewritten by another model call')
+        self.assertEqual('总额7万元', deltas)
 
     def test_final_stream_failure_is_not_saved_as_success(self):
         class LLM:

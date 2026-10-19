@@ -30,7 +30,7 @@ class AppConfig:
     max_import_bytes: int = 200 * 1024 * 1024
     max_import_rows: int = 100_000
     max_import_columns: int = 512
-    max_import_cells: int = 2_000_000
+    max_import_cells: int = 600_000
     max_cell_chars: int = 32_767
     max_total_text_chars: int = 64 * 1024 * 1024
     max_uncompressed_bytes: int = 256 * 1024 * 1024
@@ -38,7 +38,7 @@ class AppConfig:
     max_zip_entries: int = 10_000
     max_merged_cells: int = 200_000
     max_xml_entry_bytes: int = 64 * 1024 * 1024
-    max_concurrent_imports: int = 2
+    max_concurrent_imports: int = 1
     sql_timeout_ms: int = 5_000
     sql_vm_steps: int = 2_000_000
     max_concurrent_sql: int = 4
@@ -105,7 +105,7 @@ def build_app_config(raw: Optional[Dict[str, Any]] = None) -> AppConfig:
         max_import_bytes=int(server.get("max_import_bytes", 200 * 1024 * 1024)),
         max_import_rows=int(server.get("max_import_rows", 100_000)),
         max_import_columns=int(server.get("max_import_columns", 512)),
-        max_import_cells=int(server.get("max_import_cells", 2_000_000)),
+        max_import_cells=int(server.get("max_import_cells", 600_000)),
         max_cell_chars=int(server.get("max_cell_chars", 32_767)),
         max_total_text_chars=int(
             server.get("max_total_text_chars", 64 * 1024 * 1024)
@@ -119,7 +119,7 @@ def build_app_config(raw: Optional[Dict[str, Any]] = None) -> AppConfig:
         max_xml_entry_bytes=int(
             server.get("max_xml_entry_bytes", 64 * 1024 * 1024)
         ),
-        max_concurrent_imports=int(server.get("max_concurrent_imports", 2)),
+        max_concurrent_imports=int(server.get("max_concurrent_imports", 1)),
         sql_timeout_ms=int(server.get("sql_timeout_ms", 5_000)),
         sql_vm_steps=int(server.get("sql_vm_steps", 2_000_000)),
         max_concurrent_sql=int(server.get("max_concurrent_sql", 4)),

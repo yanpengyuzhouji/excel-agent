@@ -23,6 +23,41 @@ from zipfile import ZipFile
 
 from .constants import COMMON_COLUMN_NAMES, HEADER_FIELD_WORDS, PLACEHOLDER_VALUES
 
+# Shared field vocabulary helps distinguish engineering labels from sparse data.
+ENGINEERING_FIELDS = {'塔型','气象区','导线规格','安全系数','水平档距(m)','垂直档距(m)',
+                      '转角分级','海拔','设计人','校核人1','校核人2','汇总人','姓名','电话号码','结构软件'}
+
+
+def _header_index(rows):
+    fields = set(HEADER_FIELD_WORDS) | ENGINEERING_FIELDS
+    candidates = range(min(25,len(rows)))
+    strong = [i for i in candidates if sum(str(v).strip() in fields for v in rows[i] if not _is_empty(v)) >= 3
+              and all(isinstance(v,str) for v in rows[i] if not _is_empty(v))]
+    return strong[0] if strong else max(candidates,key=lambda i:_header_score(rows,i))
+
+
+def _formula_bridge(facts, header_row, left_end, right_start):
+    """A derived block must reference this row's left block in every occupied data cell."""
+    right = [(c,f) for c,f in facts.items() if _parse_cell_reference(c)[1]>=right_start
+             and _parse_cell_reference(c)[0]>header_row and f.get('raw_value') not in (None,'')]
+    if not right:
+        return False
+    for coord,fact in right:
+        formula=str(fact.get('raw_value') or '')
+        if fact.get('data_type')!='f': return False
+        row,_=_parse_cell_reference(coord)
+        from openpyxl.formula import Tokenizer
+        from openpyxl.formula.tokenizer import TokenizerError
+        try:
+            refs=[re.fullmatch(r'\$?([A-Z]+)\$?(\d+)',t.value) for t in Tokenizer(formula).items
+                  if t.type=='OPERAND' and t.subtype=='RANGE' and '!' not in t.value]
+            refs=[m.groups() for m in refs if m]
+        except (TokenizerError,ValueError,IndexError):
+            return False
+        if not any(int(r)==row and _parse_cell_reference(c+r)[1]<=left_end for c,r in refs):
+            return False
+    return True
+
 
 @dataclass(frozen=True)
 class ParserLimits:
@@ -952,8 +987,7 @@ def _build_draft(
             header_index = header_row - 1
             data_start_index = data_start_row - 1
         else:
-            candidates = range(min(25, len(rows)))
-            header_index = max(candidates, key=lambda index: _header_score(rows, index))
+            header_index = _header_index(rows)
             data_start_index = header_index + 1
         header_score = _header_score(rows, header_index)
         header = rows[header_index]
@@ -981,7 +1015,10 @@ def _build_draft(
                     runs[-1] += 1
             elif runs and runs[-1] != 0:
                 runs.append(0)
-        if sum(width>=2 for width in runs) >= 2:
+        occupied_columns=[i+1 for i,v in enumerate(occupied) if v]
+        gaps=[(a,b) for a,b in zip(occupied_columns,occupied_columns[1:]) if b>a+1]
+        derived_bridge=bool(gaps) and all(_formula_bridge(cell_facts,header_index+1,a,b) for a,b in gaps)
+        if sum(width>=2 for width in runs) >= 2 and not derived_bridge:
             issues.append({'code':'MULTIPLE_TABLE_REGIONS','level':'error',
                 'message':f'{name} 的空列分隔了多个表区，请拆分工作表后导入。'})
         if len(labels)-len(set(labels)) >= 2:

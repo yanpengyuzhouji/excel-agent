@@ -101,7 +101,7 @@ class RepeatingTodoLLM:
         self.calls += 1
         return (
             'Thought: plan\nAction: todowrite\n'
-            'Action Input: {"todos":[{"content":"x"}]}'
+            'Action Input: {"todos":[{"content":"x'+str(self.calls)+'"}]}'
         )
 
 

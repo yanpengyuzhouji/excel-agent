@@ -6,8 +6,26 @@ from app.service.llm import ExcelLLM
 
 
 class DeadlineTests(unittest.TestCase):
+    def test_deployed_model_modes_have_separate_first_content_deadlines(self):
+        from pathlib import Path
+        import yaml
+        config = yaml.safe_load((Path(__file__).resolve().parents[1] / 'config.yaml').read_text(encoding='utf-8'))
+        models = {m['name']: m for m in config['excel']['llms']}
+        for name, seconds, thinking in [('glm-5.3-bailian', 30, True), ('kimi-k3-bailian', 10, False)]:
+            with self.subTest(model=name):
+                llm = ExcelLLM(dict(models[name], api_key='test', env_file=''))
+                try:
+                    self.assertIs(llm.extra_body['enable_thinking'], thinking)
+                    self.assertEqual(seconds, llm.first_token_timeout)
+                    self.assertEqual(90, llm.timeout)
+                finally:
+                    llm._client.close()
+        for model in models.values():
+            if (model.get('extra_body') or {}).get('enable_thinking') is False:
+                self.assertEqual(10, model.get('first_token_timeout', 10))
+
     def test_first_content_timeout_ignores_heartbeats(self):
-        llm = ExcelLLM({'model': 'stub', 'timeout': 1, 'first_token_timeout': .05})
+        llm = ExcelLLM({'model': 'stub', 'timeout': 1, 'first_token_timeout': .05,'empty_response_retries':0})
         llm._client.close()
         stopped = threading.Event()
         def chunks():

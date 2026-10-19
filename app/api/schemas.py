@@ -80,6 +80,9 @@ class SQLQueryResponse(BaseModel):
     row_count: int
     truncated: bool = False
     elapsed_ms: float
+    decimal_columns: List[str] = Field(default_factory=list)
+    execution_sql: Optional[str] = None
+    precision_scope: str = 'sqlite_native'
 
 
 class ConversationSummary(BaseModel):

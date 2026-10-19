@@ -135,6 +135,18 @@ class StructuredLayoutTests(unittest.TestCase):
         draft=self.parse([['项目','描述'],[None,'首条业务描述'],['乙','第二条']],lambda s:s.merge_cells('A1:A2'))
         self.assertTrue(WorkbookImportService._validate_draft(draft)['errors'])
 
+    def test_uniform_vertical_header_merges_keep_first_business_record(self):
+        def configure(sheet):
+            sheet.merge_cells('A3:A4')
+            sheet.merge_cells('B3:B4')
+        draft=self.parse([[None,None],[None,None],['变压器容量(kVA)','接地电缆截面(mm2)'],
+                          [None,None],[160,'1*35'],[200,'1*35'],[2500,'1*240']],configure)
+        self.assertEqual([],WorkbookImportService._validate_draft(draft)['errors'])
+        self.assertEqual([5,6,7],[r['source_row'] for r in draft['sheets'][0]['rows']])
+        with closing(sqlite3.connect(self.build(draft))) as db:
+            table=draft['sheets'][0]['table_name']
+            self.assertEqual(3,db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+
     def test_catalog_exposes_region_titles_units_and_quality_notes(self):
         from app.catalog.builder import build_catalog_payload
         draft=self.parse([['=== 概览 ==='],['其中可疑文件','8'],[],['=== 分布 ==='],
@@ -144,6 +156,45 @@ class StructuredLayoutTests(unittest.TestCase):
         self.assertIn('概览',catalog['tables'][0]['display_name'])
         self.assertIn('规范数值',[c['display_name'] for c in catalog['tables'][0]['columns']])
         self.assertEqual('SOURCE_SUMMARY_MISMATCH',catalog['tables'][0]['ingestion_notes'][0]['code'])
+
+    def test_parallel_header_regions_preserve_original_column_coordinates(self):
+        draft=self.parse([[None,'塔型','设计人',None,'姓名','电话号码'],
+                          ['甲组','T1','人员甲',None,'人员乙','tel-a'],
+                          [None,'T2','人员丙',None,'人员丁','tel-b']],lambda s:s.merge_cells('A2:A3'))
+        self.assertEqual([],WorkbookImportService._validate_draft(draft)['errors'])
+        self.assertEqual(2,len(draft['sheets']))
+        right=draft['sheets'][1]
+        self.assertEqual(['E','F'],right['source_columns'])
+        self.assertEqual(['E','F'],[c['source_column'] for c in right['columns']])
+        self.assertNotIn('A2',right['cells'])
+        self.assertIn('E2',right['cells'])
+        self.build(draft)
+        broken=deepcopy(draft)
+        broken['sheets'][1]['source_columns']=['A','B']
+        with self.assertRaisesRegex(ValueError,'mapping'):
+            build_database(broken,str(Path(self.temp.name)/'bad.sqlite'),import_id='i',workbook_id='w',
+                           version=1,file_name='source.xlsx',source_hash='hash')
+
+    def test_same_row_formula_block_is_not_an_unrelated_parallel_table(self):
+        draft=self.parse([['序号','塔型','数量',None,'金额','费用'],
+                          [1,'T1',2,None,'=C2*2','=C2*3'],
+                          [2,'T2',3,None,'=C3*2','=C3*3']])
+        codes=[e['code'] for e in WorkbookImportService._validate_draft(draft)['errors']]
+        self.assertNotIn('MULTIPLE_TABLE_REGIONS',codes)
+        self.assertEqual(1,len(draft['sheets']))
+        from app.service.parser import _formula_bridge
+        self.assertFalse(_formula_bridge({'E2':{'raw_value':'=Other!$B2','data_type':'f'}},1,3,5))
+        self.assertFalse(_formula_bridge({'E2':{'raw_value':'="B2"','data_type':'f'}},1,3,5))
+        self.assertTrue(_formula_bridge({'E2':{'raw_value':'=Other!$B2/$C2','data_type':'f'}},1,3,5))
+
+    def test_explicit_engineering_header_beats_sparse_merged_data(self):
+        def configure(s):
+            s.merge_cells('A2:A10');s.merge_cells('B2:B10')
+        rows=[['序号','塔型','气象区','导线规格','安全系数','水平档距(m)'],
+              [1,'T1','A','wire',6.5,80]]+[[None,None,'A','wire',6.5,80] for _ in range(8)]
+        draft=self.parse(rows,configure)
+        self.assertEqual(1,draft['sheets'][0]['header_row'])
+        self.assertEqual([],WorkbookImportService._validate_draft(draft)['errors'])
 
 
 if __name__ == '__main__':

@@ -53,6 +53,7 @@ from ..models.agent import (
 from ..catalog.builder import build_catalog_payload
 from .materializer import build_database as materialize_database
 from .parser import dump_draft, load_draft, parse_workbook
+from .decimal_projection import compile_decimal_projection, register_decimal_functions
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,13 @@ def _summary_sheets(draft: Dict[str, Any]) -> List[Dict[str, Any]]:
             {k: v for k, v in sheet.items() if k not in {"rows", "merge_lineage", 'cells', 'excluded_rows', 'source_classifications'}}
         )
     return result
+
+
+def _decode_catalog(encoded):
+    payload = json.loads(encoded or '{}')
+    if not isinstance(payload, dict) or not isinstance(payload.get('tables'), list) or not payload['tables']:
+        raise ValueError('Workbook catalog has no usable table metadata')
+    return payload
 
 
 class WorkbookImportService:
@@ -719,8 +727,17 @@ class WorkbookImportService:
         for sheet in data_sheets:
             sheet_id = sheet["sheet_id"]
             if sheet.get('excluded_rows'):
+                excluded = sheet['excluded_rows']
+                classifications = sheet.get('source_classifications') or {}
+                safe = all(row.get('reason') in {'note', 'repeated_header'}
+                           and type(row.get('source_row')) is int
+                           and classifications.get(str(row['source_row'])) == row['reason']
+                           and isinstance(row.get('values'), list) and bool(row['values'])
+                           for row in excluded)
                 warnings.append({'code':'NONBUSINESS_ROWS','level':'warning','sheet_id':sheet_id,
-                    'count':len(sheet['excluded_rows']), 'message':'已将重复表头、汇总或备注行单独留痕，不作为业务明细；请确认统计口径。'})
+                    'count':len(excluded), 'auto_confirm_safe':safe,
+                    'message':('已识别备注或重复表头并完整留痕，不计入业务明细；原文仍可查询。' if safe else
+                               '已将汇总或待确认的非业务行单独留痕，不作为业务明细；请确认统计口径。')})
             table_name = sheet.get("table_name", "")
             try:
                 _quote_identifier(table_name)
@@ -1119,7 +1136,11 @@ class WorkbookImportService:
                 dataset.workbook_id, owner_id=owner_id
             )
             if current and current.active_import_id == dataset.active_import_id:
-                continue
+                try:
+                    _decode_catalog(current.catalog_json)
+                    continue
+                except (TypeError, ValueError):
+                    pass  # Repair catalogs truncated by older service versions.
             try:
                 self.refresh_workbook_catalog(dataset.workbook_id)
             except Exception:
@@ -1132,9 +1153,9 @@ class WorkbookImportService:
         result = []
         for row in rows:
             try:
-                payload = json.loads(row.catalog_json or "{}")
-            except (TypeError, ValueError):
-                payload = {}
+                payload = _decode_catalog(row.catalog_json)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f'Workbook catalog unavailable for {row.workbook_id}; metadata repair failed') from exc
             result.append(
                 {
                     "workbook_id": row.workbook_id,
@@ -1335,6 +1356,8 @@ class WorkbookImportService:
         snapshot: Dict[str, Any],
         sql: str,
         max_rows: int = 500,
+        *,
+        exact_output: bool = False,
     ) -> SQLQueryResponse:
         """Query a server-created, version-pinned workbook snapshot.
 
@@ -1356,11 +1379,14 @@ class WorkbookImportService:
             max_vm_steps = max(1, int(getattr(self._config, "sql_vm_steps", 2_000_000)))
             progress_granularity = min(1_000, max_vm_steps)
             started = time.perf_counter()
+            execution_sql, decimal_columns = compile_decimal_projection(sql) if exact_output else (sql, [])
             uri = f"file:{database_path.resolve().as_posix()}?mode=ro"
             connection = sqlite3.connect(uri, uri=True, timeout=1.0)
             interrupted_by = None
             vm_steps = 0
             try:
+                if exact_output:
+                    register_decimal_functions(connection)
                 forbidden_actions = {
                     sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE,
                     sqlite3.SQLITE_DELETE, sqlite3.SQLITE_CREATE_TABLE,
@@ -1389,7 +1415,7 @@ class WorkbookImportService:
                     progress_handler, progress_granularity
                 )
                 try:
-                    cursor = connection.execute(sql.strip().rstrip(";"))
+                    cursor = connection.execute(execution_sql.strip().rstrip(";"))
                     columns = [item[0] for item in cursor.description or []]
                     rows = cursor.fetchmany(max_rows + 1)
                 except sqlite3.OperationalError as exc:
@@ -1411,6 +1437,9 @@ class WorkbookImportService:
             row_count=len(rows),
             truncated=truncated,
             elapsed_ms=round(elapsed, 3),
+            decimal_columns=decimal_columns,
+            execution_sql=execution_sql if decimal_columns else None,
+            precision_scope='decimal_output_expressions_from_sqlite_scalars' if decimal_columns else 'sqlite_native',
         )
 
     @staticmethod

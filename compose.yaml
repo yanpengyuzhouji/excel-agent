@@ -1,8 +1,11 @@
 services:
   excel-agent:
+    image: excel-workbook-service:1.2.0-rc.39
     build: .
+    env_file:
+      - .env
     ports:
-      - "127.0.0.1:8090:8090"
+      - "127.0.0.1:${EXCEL_PUBLISHED_PORT:-8091}:8090"
     environment:
       EXCEL_REQUIRE_AUTH: "false"
       EXCEL_LLM_BASE_URL: ${EXCEL_LLM_BASE_URL:-https://api.deepseek.com/v1}
@@ -14,9 +17,14 @@ services:
       - excel-data:/data
     restart: unless-stopped
     init: true
-    mem_limit: 2g
-    cpus: 2
+    mem_limit: 8g
+    cpus: 4
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 volumes:
   excel-data:

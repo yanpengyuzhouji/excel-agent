@@ -78,6 +78,7 @@ def main():
             page.locator('#globalReport summary').click()
             assert page.frame_locator('#globalReport iframe').locator('h1').inner_text() == '测试报告'
             page.locator('#conversationList [data-conversation]').click()
+            page.wait_for_function("!globalAgent.loading")
             assert page.locator('#attachmentChips').inner_text().find('test.csv') >= 0
             # Dragging into the input/composer uses the same upload path.
             page.evaluate("""() => {const data=new DataTransfer();data.items.add(new File(['name,amount\\na,10'],'second.csv',{type:'text/csv'}));document.querySelector('#composer').dispatchEvent(new DragEvent('drop',{bubbles:true,dataTransfer:data}));}""")

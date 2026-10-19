@@ -1,4 +1,5 @@
 .env
+.env.*
 .venv/
 .venv-linux/
 __pycache__/
@@ -14,3 +15,7 @@ data/workbook_imports/
 cleanup-archive/
 data/*.log
 data/*.png
+
+# Private real-business acceptance corpus; never commit source files or manifests.
+data/business_acceptance/
+scripts/node_modules/

@@ -5,7 +5,8 @@ def review_issues(import_response):
     validation = import_response.validation or {}
     errors = list(validation.get('errors', []))
     severe = [w for w in validation.get('warnings', [])
-              if w.get('code') not in {'MIXED_NUMERIC_PLACEHOLDER', 'HIDDEN_ROWS', 'MERGED_CELLS', 'FORMULAS'}]
+              if w.get('code') not in {'MIXED_NUMERIC_PLACEHOLDER', 'HIDDEN_ROWS', 'MERGED_CELLS', 'FORMULAS'}
+              and not (w.get('code') == 'NONBUSINESS_ROWS' and w.get('auto_confirm_safe') is True)]
     # A formula without a cached value becomes NULL: never silently auto-commit.
     for sheet in import_response.sheets:
         if not sheet.get('enabled') or sheet.get('kind') != 'data':

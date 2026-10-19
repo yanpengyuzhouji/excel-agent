@@ -12,6 +12,19 @@ from app.main import app
 
 
 class AttachmentApiTests(unittest.TestCase):
+    def test_retained_note_and_repeated_header_are_automatically_ready(self):
+        item = self.upload_rows([['项目','金额'],['甲',10],['乙',20],
+                                 ['项目','金额'],['备注：合计3类设备；1*35；2025/03/01']])
+        self.assertEqual('ready', item['status'], item)
+        self.assertEqual([], item['severe_warnings'])
+        warning = next(w for w in item['warnings'] if w['code'] == 'NONBUSINESS_ROWS')
+        self.assertIs(True, warning['auto_confirm_safe'])
+        self.assertEqual(2, warning['count'])
+        catalog = next(c for c in self.client.get('/api/v1/data-catalog').json()
+                       if c['workbook_id'] == item['workbook_id'])
+        self.assertEqual(2, catalog['catalog']['tables'][0]['row_count'])
+        self.assertEqual(2, catalog['catalog']['tables'][0]['excluded_row_count'])
+
     def test_partitioned_summary_is_automatically_ready_and_queryable(self):
         item=self.upload_rows([['=== 概览 ==='],['总文件数','1,234'],[],
                                ['=== 后缀分布 ==='],['后缀','数量'],['.pdf',1200],['.xlsx',34]])
@@ -80,8 +93,12 @@ class AttachmentApiTests(unittest.TestCase):
     def test_agent_streamed_answer_is_persisted_once(self):
         import json
         attachment = self.upload()
-        replies = iter(['Action: query_workbook\nAction Input: {"sql":"SELECT 7 AS total"}',
-                        'Action: terminate\nAction Input: {"result":"总额7"}'])
+        catalog = next(c for c in self.client.get('/api/v1/data-catalog').json() if c['workbook_id'] == attachment['workbook_id'])
+        table = catalog['catalog']['tables'][0]
+        amount = table['columns'][1]['physical_name']
+        sql = f'SELECT SUM("{amount}") AS total FROM "{table["table_name"]}"'
+        replies = iter(['Action: query_workbook\nAction Input: '+json.dumps({'sql':sql}),
+                        'Action: terminate\nAction Input: {"result":"查询总额为{{result-1:0:total|0}}。"}'])
         llm = SimpleNamespace(model_name='stub', max_tokens=4096,
             generate_chat=lambda messages: next(replies),
             generate_chat_stream=lambda messages: iter(['查询总额为', '7。']))
@@ -89,12 +106,12 @@ class AttachmentApiTests(unittest.TestCase):
             response = self.client.post('/api/v1/agent/ask', json={'conv_id':self.conv,
                 'question':'分析金额', 'scope':{'mode':'selected','workbook_ids':[attachment['workbook_id']]}})
         events = [json.loads(line[5:]) for line in response.text.splitlines() if line.startswith('data:')]
-        self.assertEqual('查询总额为7。', ''.join(e['text'] for e in events if e['type']=='answer.delta'))
+        self.assertEqual('查询总额为210。', ''.join(e['text'] for e in events if e['type']=='answer.delta'))
         self.assertEqual('done', events[-1]['type'])
         detail = self.client.get(f'/api/v1/agent/conversations/{self.conv}').json()
         answers = [m for m in detail['messages'] if m['role']=='ai']
         self.assertEqual(len(answers), 1)
-        self.assertEqual(answers[0]['content'], '查询总额为7。')
+        self.assertEqual(answers[0]['content'], '查询总额为210。')
         self.assertEqual(answers[0]['meta']['timing'], events[-1]['timing'])
         self.assertEqual(answers[0]['meta']['attachments'], events[-1]['attachments'])
         self.assertEqual(events[-1]['attachments'][0]['workbook_id'], attachment['workbook_id'])

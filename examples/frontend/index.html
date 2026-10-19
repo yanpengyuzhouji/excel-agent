@@ -22,6 +22,13 @@ const $=s=>document.querySelector(s);
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 if(window.innerWidth<800)document.body.classList.add('sidebar-collapsed');
 const globalAgent={conversations:[],catalogs:[],models:[],history:[],attachments:[],selectedWorkbookIds:[],steps:[],sources:[],report:null,answer:'',status:'准备就绪',currentRound:0,context:null,model:'',draft:'',busy:false,uploading:false,selectedConversationId:'',processExpanded:false};
+const conversationCache=new Map();
+let conversationRequest=null,conversationSequence=0;
+function cacheConversation(id,data){
+ // ponytail: keep at most eight conversations in page memory, never persistent storage.
+ conversationCache.delete(id);conversationCache.set(id,structuredClone(data));
+ if(conversationCache.size>8)conversationCache.delete(conversationCache.keys().next().value);
+}
 let executionTimer=null,executionStarted=null;
 $('#globalProcess').ontoggle=()=>{globalAgent.processExpanded=$('#globalProcess').open;};
 $('#globalElapsed').title='点击展开或收起执行过程';
@@ -37,27 +44,31 @@ function answerTimestampHtml(timing,sources=[]){
  const full=date.toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
  return `<footer class="answer-meta">${names}<time tabindex="0" datetime="${esc(date.toISOString())}" aria-label="回答完成于 ${esc(full)}" data-tooltip="${esc(full)}">${esc(short)}</time></footer>`;
 }
-async function api(path,opts={}){const r=await fetch(API+path,opts);if(!r.ok){const text=await r.text();let detail=text;try{detail=JSON.parse(text).detail||text;}catch{}throw Error(String(detail).slice(0,250));}return r.status===204?null:r.json();}
+async function api(path,opts={}){if(opts.method&&opts.method!=='GET')conversationCache.clear();const r=await fetch(API+path,opts);if(!r.ok){const text=await r.text();let detail=text;try{detail=JSON.parse(text).detail||text;}catch{}throw Object.assign(Error(String(detail).slice(0,250)),{status:r.status});}return r.status===204?null:r.json();}
 function notice(text){const el=document.createElement('p');el.textContent=text;el.className='error';$('#globalNotices').appendChild(el);$('#connectionStatus').textContent=text;}
 function globalActionLabel(action) {
-  return ({read_query_result:'读取已保存查询证据', verify_record_count:'核验总行数与业务记录口径', observe_execution:'检查执行状态与数据证据', search_workbooks:'查找工作簿', inspect_workbook:'查看结构与样本', inspect_source:'查看结构与样本', query_workbook:'查询数据', sql_query:'查询数据', aggregate_results:'汇总与比较', html_interpreter:'生成分析报告'})[action] || action || '执行步骤';
+  return ({define_analysis:'明确分析任务与统计口径', read_query_result:'读取已保存查询证据', verify_record_count:'核验总行数与业务记录口径', observe_execution:'检查执行状态与数据证据', search_workbooks:'查找工作簿', inspect_workbook:'查看结构与样本', inspect_source:'查看结构与样本', query_workbook:'查询数据', sql_query:'查询数据', aggregate_results:'汇总与比较', html_interpreter:'生成分析报告'})[action] || action || '执行步骤';
 }
 function globalAnswerHtml(text) {
-  const format = value => esc(value).replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>');
+  const format = value => {
+    const literals=[];
+    const protectedText=String(value).replace(/\u0000/g,'').replace(/\\([\\`*_\[\]<>|&])/g,(_,c)=>'\u0000'+(literals.push(esc(c))-1)+'\u0000');
+    return esc(protectedText).replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/&lt;br&gt;/g,'<br>').replace(/\u0000(\d+)\u0000/g,(_,i)=>literals[Number(i)]);
+  };
   const inline = value => {
     // Only link local report routes; model-provided HTML and external URLs stay text.
-    const pattern = /(?:\[[^\]\n]*\]\()?((?:\/api\/v1\/(?:agent\/conversations|workbooks)\/[A-Za-z0-9_-]+\/reports\/)[A-Za-z0-9_%\\-]+)(?:\))?/g;
+    const pattern = /(?:\[[^\]\n]*\]\()?((?:\/api\/v1\/(?:agent\/conversations|workbooks)\/[A-Za-z0-9_-]+\/reports\/)[A-Za-z0-9_%\\-]+(?:\/pdf)?)(?:\))?/g;
     let output = '', offset = 0;
     for (const match of String(value).matchAll(pattern)) {
       const url = match[1].replace(/\\_/g, '_');
-      output += format(value.slice(offset, match.index)) + `<a href="${esc(url)}" target="_blank" rel="noopener">查看报告 ↗</a>`;
+      output += format(value.slice(offset, match.index)) + `<a href="${esc(url)}" target="_blank" rel="noopener">${url.endsWith('/pdf')?'下载 PDF':'查看报告 ↗'}</a>`;
       offset = match.index + match[0].length;
     }
     return output + format(value.slice(offset));
   };
   const lines = String(text || '').replace(/\r/g,'').split('\n');
   const output = [];
-  const cells = line => line.trim().replace(/^\||\|$/g,'').split('|').map(s=>s.trim());
+  const cells = line => line.trim().replace(/^\||\|$/g,'').split(/(?<!\\)\|/).map(s=>s.trim());
   for (let i=0;i<lines.length;) {
     const line=lines[i];
     if (!line.trim()) { i++; continue; }
@@ -84,6 +95,7 @@ function globalAnswerHtml(text) {
   return output.join('');
 }
 function globalStepBody(result) {
+  if (result.analysis) { const a=result.analysis; return a.tasks?.length ? `<p class="muted">本轮声明的分析任务与口径：</p>${a.tasks.map(t=>`<p>${esc(t.label)} · <code>${esc(t.operation)}</code>${t.scope?' · '+esc(t.scope):''}</p>`).join('')}` : `<p>${esc(a.message || a.mode || '')}</p>`; }
   if (result.cached) return `<p class="muted">读取缓存证据，未重新执行 SQL。当前页 ${esc(result.page?.shown || 0)} 行／缓存 ${esc(result.page?.total_cached_rows || 0)} 行${result.page?.has_more ? '，还有后续数据' : ''}。</p>${globalResultHtml(result)}`;
   if (result.counting_check) { const c=result.counting_check; return `<p>总行数：${esc(c.total_rows)} · 疑似备注／汇总行：${esc(c.suspected_nonbusiness_rows)} · 候选业务记录：${esc(c.candidate_business_rows)}</p><p class="muted">疑似行需结合业务含义确认，未自动删除或排除。</p>${globalResultHtml(result)}${c.sample_rows?.length ? '<h4>疑似非业务行样本</h4>'+globalResultHtml({columns:c.sample_columns,rows:c.sample_rows}) : ''}`; }
   if (result.successful_queries != null) return `<p>有效查询：${esc(result.successful_queries)} 项 · ${result.report_ready ? '已有报告数据依据' : '尚缺成功查询'}</p>${(result.evidence || []).map(r=>`<p><code>${esc(r.result_id)}</code> · ${esc(r.row_count)} 行${r.empty ? ' · 空结果' : ''}${r.truncated ? ' · 结果截断，按需补查' : ''}</p>`).join('')}<p>查询失败来源：${esc((result.failed_sources || []).length)} 个</p>`;
@@ -157,12 +169,12 @@ function renderGlobalExecution() {
 
 
 function renderMessage(message){const user=message.role==='user';return '<article class="history-message '+(user?'message-user':'message-assistant')+'" aria-label="'+(user?'你的消息':'助手回答')+'"><div class="message-content">'+(user?esc(message.content||'').replace(/\n/g,'<br>'):globalAnswerHtml(message.content||''))+'</div>'+(!user?answerTimestampHtml(message.meta?.timing,message.meta?.attachments||message.meta?.sources||[]):'')+'</article>';}
-async function refreshHistory(){globalAgent.conversations=await api('/agent/conversations');renderSidebar();}
+async function refreshHistory(){globalAgent.conversations=await api('/agent/conversations');const ids=new Set(globalAgent.conversations.map(c=>c.conv_id));for(const id of conversationCache.keys())if(!ids.has(id))conversationCache.delete(id);renderSidebar();}
 function renderSidebar(){
  const search=$('#historySearch').value.toLowerCase();
  $('#conversationList').innerHTML=globalAgent.conversations.filter(c=>(c.title||'').toLowerCase().includes(search)).map(c=>'<div class="conversation-row '+(c.conv_id===globalAgent.selectedConversationId?'active':'')+'"><button data-conversation="'+esc(c.conv_id)+'" title="'+esc(c.title||'新对话')+(c.pinned?' · 已置顶':'')+'" aria-haspopup="menu">'+esc(c.title||'新对话')+'</button></div>').join('')||'<p class="muted">暂无会话</p>';
  $('#conversationList').querySelectorAll('[data-conversation]').forEach(b=>{
-  b.onclick=()=>{if(!locked())loadGlobalConversation(b.dataset.conversation).catch(e=>notice(e.message));};
+  b.onclick=()=>{if(!globalAgent.busy&&!globalAgent.uploading)loadGlobalConversation(b.dataset.conversation).catch(e=>notice(e.message));};
   b.oncontextmenu=e=>{e.preventDefault();showConversationMenu(b.dataset.conversation,e.clientX,e.clientY);};
   b.onkeydown=e=>{if(e.key==='ContextMenu'||(e.shiftKey&&e.key==='F10')){e.preventDefault();const r=b.getBoundingClientRect();showConversationMenu(b.dataset.conversation,r.left,r.bottom);}};
  });
@@ -194,8 +206,8 @@ function showConversationMenu(id,x,y){
 document.addEventListener('pointerdown',e=>{if(!e.target.closest('#conversationMenu'))closeConversationMenu();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeConversationMenu();});
 window.addEventListener('resize',closeConversationMenu);
-function locked(){return globalAgent.busy||globalAgent.uploading;}
-function syncControls(){const lock=locked();['#globalAskBtn','#globalUpload','#globalModel','#newChat','#fileInput'].forEach(s=>$(s).disabled=lock);$('#globalInput').disabled=globalAgent.busy;}
+function locked(){return globalAgent.busy||globalAgent.uploading||globalAgent.loading||globalAgent.loadFailed;}
+function syncControls(){const lock=locked();['#globalAskBtn','#globalUpload','#globalModel','#fileInput'].forEach(s=>$(s).disabled=lock);$('#newChat').disabled=globalAgent.busy||globalAgent.uploading;$('#globalInput').disabled=globalAgent.busy;}
 async function ensureConversation(){if(!globalAgent.selectedConversationId){const c=await api('/agent/conversations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'新对话'})});globalAgent.selectedConversationId=c.conv_id;await refreshHistory();}return globalAgent.selectedConversationId;}
 function renderAttachments(){
  const selected=new Set(globalAgent.selectedWorkbookIds);
@@ -230,13 +242,44 @@ async function uploadFiles(files){
  }catch(e){notice(e.message);}finally{globalAgent.uploading=false;syncControls();renderAttachments();$('#fileInput').value='';const review=globalAgent.attachments.find(a=>['needs_review','blocked'].includes(a.status));if(review)showReview(review);}
 }
 async function loadGlobalConversation(id){
+ if(globalAgent.selectedConversationId&&!globalAgent.loading&&!globalAgent.loadFailed){
+  cacheConversation(globalAgent.selectedConversationId,{title:$('#conversationTitle').textContent,messages:globalAgent.history,scope:{attachments:globalAgent.attachments,workbook_ids:globalAgent.selectedWorkbookIds},model_name:globalAgent.model,context:globalAgent.context,sources:globalAgent.sources});
+ }
+ const sequence=++conversationSequence;
+ conversationRequest?.abort();conversationRequest=id?new AbortController():null;
+ const signal=conversationRequest?.signal;
  stopExecutionTimer();globalAgent.timing=null;
  globalAgent.selectedConversationId=id;globalAgent.draft='';$('#globalInput').value='';$('#globalPast').innerHTML='';$('#globalNotices').innerHTML='';$('#connectionStatus').textContent='';
- const d=id?await api('/agent/conversations/'+id):{messages:[],scope:{},title:'新对话'};
+ globalAgent.loading=Boolean(id);globalAgent.loadFailed=false;
+ const empty={messages:[],scope:{attachments:[],workbook_ids:[]},title:globalAgent.conversations.find(c=>c.conv_id===id)?.title||'新对话'};
+ applyGlobalConversation(id,structuredClone(conversationCache.get(id)||empty));
+ syncControls();
+ if(!id)return;
+ $('#connectionStatus').textContent=conversationCache.has(id)?'正在同步…':'正在加载会话…';
+ try{
+  const d=await api('/agent/conversations/'+id,{signal,cache:'no-store'});
+  d.scope=d.scope||{};
+  // Resolve legacy sources before applying anything, so cancelled requests cannot leak attachments.
+  if(!('attachments' in d.scope)){
+   const catalog=await api('/data-catalog',{signal});
+   d.scope.attachments=catalog.filter(c=>(d.scope.workbook_ids||[]).includes(c.workbook_id)).map(c=>({filename:c.display_name,workbook_id:c.workbook_id,import_id:c.import_id||c.workbook_id,status:'ready',legacy:true}));
+  }
+  if(sequence!==conversationSequence)return;
+  cacheConversation(id,d);applyGlobalConversation(id,structuredClone(d));
+  $('#connectionStatus').textContent='';
+ }catch(e){
+  if(sequence!==conversationSequence||e.name==='AbortError')return;
+  globalAgent.loadFailed=e.status!==404;
+  if(e.status===404){conversationCache.delete(id);globalAgent.selectedConversationId='';applyGlobalConversation('',{...empty,title:'新对话'});}
+  notice(e.status===404?'此会话已被删除':(conversationCache.has(id)?'同步失败，当前显示缓存；请重新打开会话重试。':e.message));
+ }finally{
+  if(sequence===conversationSequence){globalAgent.loading=false;conversationRequest=null;syncControls();renderAttachments();}
+ }
+}
+function applyGlobalConversation(id,d){
  globalAgent.history=d.messages||[];globalAgent.attachments=d.scope.attachments||[];
  globalAgent.history.forEach(m=>{if(!['ai','assistant'].includes(m.role)||m.meta?.attachments)return;const found=new Map();globalAgent.history.filter(t=>t.round_index===m.round_index&&t.role==='tool').forEach(t=>{const detail=t.meta?.detail||{},r=detail.result||detail;if(r.source?.workbook_id)found.set(r.source.workbook_id,r.source);if(detail.type==='scope.resolved'||(detail.type==='step.done'&&detail.action==='html_interpreter'))(r.sources||[]).forEach(s=>found.set(s.workbook_id,s));});m.meta={...m.meta,attachments:[...found.values()]};});
  // Older conversations remain readable; expose their selected sources as attachments.
- if(!('attachments' in d.scope)){const catalog=id?await api('/data-catalog'):[];globalAgent.attachments=catalog.filter(c=>(d.scope.workbook_ids||[]).includes(c.workbook_id)).map(c=>({filename:c.display_name,workbook_id:c.workbook_id,import_id:c.import_id||c.workbook_id,status:'ready',legacy:true}));}
  globalAgent.selectedWorkbookIds=d.scope.workbook_ids||[];globalAgent.model=d.model_name||'';globalAgent.context=d.context||null;
  globalAgent.currentRound=Math.max(0,...globalAgent.history.map(m=>m.round_index||0));
  const current=globalAgent.history.filter(m=>m.round_index===globalAgent.currentRound);
@@ -266,7 +309,7 @@ async function doGlobalAsk(){
  $('#globalNotices').innerHTML='';$('#connectionStatus').textContent='';
  const question=$('#globalInput').value.trim();if(!question||locked())return;
  try{
-  const id=await ensureConversation();globalAgent.busy=true;syncControls();globalAgent.lastQuestion=question;
+  const id=await ensureConversation();conversationCache.clear();globalAgent.busy=true;syncControls();globalAgent.lastQuestion=question;
   startExecutionTimer();
   if(!globalAgent.history.some(m=>m.role==='user'))$('#conversationTitle').textContent=question.slice(0,80);
   $('#globalInput').value='';globalAgent.draft='';
@@ -287,7 +330,7 @@ $('#globalAskBtn').onclick=doGlobalAsk;
 $('#globalRetry').onclick=()=>{$('#globalInput').value=globalAgent.lastQuestion||'';doGlobalAsk();};
 $('#globalInput').oninput=e=>{globalAgent.draft=e.target.value;renderGlobalContext();};
 $('#globalInput').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();doGlobalAsk();}};
-$('#newChat').onclick=()=>{if(!locked())loadGlobalConversation('');};
+$('#newChat').onclick=()=>{if(!globalAgent.busy&&!globalAgent.uploading)loadGlobalConversation('');};
 $('#historySearch').oninput=renderSidebar;
 $('#toggleSidebar').onclick=()=>document.body.classList.toggle('sidebar-collapsed');
 $('#globalModel').onchange=e=>{globalAgent.model=e.target.value;renderGlobalContext();};

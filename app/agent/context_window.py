@@ -79,8 +79,9 @@ class ContextWindow:
         system = [m for m in messages if m.get('role')=='system']
         controller = [m for m in messages if m.get('content','').startswith('Execution controller state:')][-1:]
         pinned = system+[current_question]+controller
-        target = int(available*.6)
-        if estimate_tokens(pinned) >= target:
+        pinned_tokens = estimate_tokens(pinned)
+        target = min(available-128,max(int(available*.6),pinned_tokens+256))
+        if pinned_tokens+64 >= available:
             raise BudgetExceeded('Current question and mandatory context exceed the available window; shorten the request or increase the configured window.')
         others = [m for m in messages if all(m is not p for p in pinned)]
         selected = []

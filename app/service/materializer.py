@@ -76,6 +76,12 @@ def _row_values(row, selected_columns):
 
 def _source_facts(sheet):
     """Sheet facts are authoritative; row facts may repeat them identically."""
+    if sheet.get('source_columns'):
+        expected=[c['source_column'] for c in sheet.get('columns',[]) if not c.get('derived')]
+        if sheet['source_columns']!=expected:
+            raise ValueError('Source column mapping does not match region columns')
+        if any(len(r.get('raw_values',r['values']))!=len(expected) for r in sheet.get('rows',[])):
+            raise ValueError('Source region row width does not match its column mapping')
     facts = dict(sheet.get("cells") or {})
     for row in sheet.get("rows", []):
         source_row = row["source_row"]
@@ -86,7 +92,8 @@ def _source_facts(sheet):
             facts[coordinate] = detail
         originals = row.get("raw_values", row["values"])
         for index, value in enumerate(originals, 1):
-            coordinate = f"{_column_letter(index)}{source_row}"
+            letter=sheet['source_columns'][index-1] if sheet.get('source_columns') else _column_letter(index)
+            coordinate = f"{letter}{source_row}"
             merge = sheet.get('merge_lineage',{}).get(coordinate)
             if 'raw_values' not in row and merge and merge.get('source_cell') != coordinate:
                 # Legacy drafts retained effective fills plus explicit merge lineage.
@@ -95,7 +102,8 @@ def _source_facts(sheet):
                                          "source_cell": coordinate})
     for row in sheet.get("excluded_rows", []):
         for index, value in enumerate(row.get("values", []), 1):
-            coordinate = f"{_column_letter(index)}{row['source_row']}"
+            letter=sheet['source_columns'][index-1] if sheet.get('source_columns') else _column_letter(index)
+            coordinate = f"{letter}{row['source_row']}"
             facts.setdefault(coordinate, {"raw_value": value, "value": value,
                                          "source_cell": coordinate})
     for coordinate, fact in facts.items():
