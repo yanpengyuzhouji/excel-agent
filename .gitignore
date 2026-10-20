@@ -9,12 +9,15 @@ __pycache__/
 .ruff_cache/
 .codex-local/
 data/workbook_imports/
+data/docker/
+data/backups/
 
 # Local Git metadata is managed outside this workspace in this environment.
 .git/
 cleanup-archive/
 data/*.log
 data/*.png
+data/lan-access-result.json
 
 # Private real-business acceptance corpus; never commit source files or manifests.
 data/business_acceptance/

@@ -144,6 +144,44 @@ excel:
       analysis_route: large
       model_size_b: 27
       provider: modelscope
+    - name: "Qwen3-14B-SiliconFlow"
+      label: "Qwen3-14B (硅基流动)"
+      base_url: "https://api.siliconflow.cn/v1"
+      model: "Qwen/Qwen3-14B"
+      api_key_env: "SILICONFLOW_API_KEY"
+      env_file: ".env"
+      extra_body:
+        enable_thinking: false
+      stream: true
+      temperature: 0.7
+      max_tokens: 8192
+      context_window_tokens: 32768
+      timeout: 90
+      first_token_timeout: 10
+      max_retries: 0
+      analysis_route: large
+      model_size_b: 14
+      provider: siliconflow
+      structured_control: false
+    - name: "Qwen3-14B-thinking-SiliconFlow"
+      label: "Qwen3-14B (硅基流动 · 思考)"
+      base_url: "https://api.siliconflow.cn/v1"
+      model: "Qwen/Qwen3-14B"
+      api_key_env: "SILICONFLOW_API_KEY"
+      env_file: ".env"
+      extra_body:
+        enable_thinking: true
+      stream: true
+      temperature: 0.6
+      max_tokens: 8192
+      context_window_tokens: 32768
+      timeout: 90
+      first_token_timeout: 30
+      max_retries: 0
+      analysis_route: large
+      model_size_b: 14
+      provider: siliconflow
+      structured_control: false
   agent:
     # The global Agent is enabled by default. Set false for a reversible
     # rollout/rollback without changing the per-workbook API contract.

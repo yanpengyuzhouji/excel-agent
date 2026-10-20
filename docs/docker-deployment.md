@@ -1,6 +1,6 @@
 # Excel API 封装与部署
 
-当前冻结候选为RC39，默认直接使用官方DeepSeek Flash，不经百炼；同版本完整100题和隔离运维状态见[RC39收敛验收](release-1.2.0-rc.39.md)。历史RC13/RC14/RC16结论不能代表当前镜像；本页说明封装、测试与部署步骤，最终放行以当前版本的独立完整验收记录为准。
+当前镜像为RC43，默认直接使用官方DeepSeek Flash，不经百炼；RC39完整100题和隔离运维历史记录见[RC39收敛验收](release-1.2.0-rc.39.md)。本次部署配置改为项目目录挂载，不改变镜像内业务代码。
 
 ## 交付边界
 
@@ -32,6 +32,7 @@ notepad .env
 
 ```powershell
 docker compose -f compose.yaml -f compose.test.yaml config --quiet
+New-Item -ItemType Directory -Path .\data\docker -Force
 docker compose -f compose.yaml -f compose.test.yaml up -d --build
 docker compose -f compose.yaml -f compose.test.yaml ps
 Invoke-RestMethod http://127.0.0.1:8091/api/v1/health
@@ -67,15 +68,48 @@ docker compose restart excel-agent
 docker compose -f compose.yaml -f compose.test.yaml down
 ```
 
-命名卷挂载 `/data`，保存元数据库、源附件、草稿、查询库、报告和文件日志。Compose 项目名决定卷名前缀；迁移时保持项目名或显式迁移卷。down 保留卷，`down -v` 会删除数据，不作为普通重启命令。现有 Windows 原生 data 目录不会自动迁移到容器。
+默认将项目 `./data/docker` 绑定挂载到容器 `/data`，保存元数据库、源附件、草稿、查询库、缓存索引、报告和文件日志。相对路径以compose.yaml所在项目目录为基准，不依赖固定盘符、主机IP或卷名前缀。`down`保留宿主目录；不要使用带删除数据目的的清理命令。旧Windows原生data/workbook_imports与历史测试集不会混入服务数据。
+
+本机位置示例：`D:\git\excel-workbook-service\data\docker`。Ubuntu示例：`/opt/excel-workbook-service/data/docker`。查看文件可以，直接编辑源附件、草稿或SQLite会破坏缓存及证据一致性。复制项目代码时不要无意将真实业务数据和.env发送到其他环境。
+
+Windows目录跨虚拟机挂载可能增加I/O延迟；Ubuntu生产目录建议使用本地磁盘，不要直接将SQLite工作目录放在共享网络文件系统。
 
 备份应覆盖整个数据卷。初期采用停服后备份，再启动；恢复到独立环境验证附件、会话和报告。正在使用的 SQLite 数据文件不宜直接逐个复制充当一致性备份。当前无自动 TTL，删除会话按引用关系清理，清理警告应检查并跟进。
 
-默认单实例，2 CPU、2 GiB 内存；导入并发 1、Agent 并发 2、SQL 并发 4，超限 429，通常带 Retry-After: 5。导入限制为全工作簿合计 600,000 个网格单元格、每表 100,000 行（包含表头）、512 列。200 MB 上传限制不是可解析规模承诺，复杂样式和稀疏区域仍可能显著增加内存。资源上限不是任务级内存隔离，不保证所有接近文件上限的导入都能在 2 GiB 完成。不要用多个实例共享数据卷直接横向扩容：并发锁与任务状态主要是进程内的。
+默认单实例，当前compose限制4 CPU、8 GiB内存；运行时并发以config.yaml为准，附件缓存发布在单进程内串行，超限通常返回429。导入限制为全工作簿合计600,000个网格单元格、每表100,000行（包含表头）、512列。200 MB上传限制不是可解析规模承诺。不要用多个实例共享数据目录直接横向扩容：并发锁与任务状态主要是进程内的。
 
 ## Ubuntu 和正式接入
 
-安装 Docker Engine 与 Compose 插件，复制项目、运行时 .env，执行 `docker compose up -d --build`。构建需要访问基础镜像、Debian 和 Python 软件源；离线环境先在同架构环境构建并通过 docker save/load 分发镜像。当前候选版见 [RC8发布说明](release-1.2.0-rc.8.md)：基础镜像固定摘要、Python运行依赖由 requirements.lock 精确锁定。Debian软件源未做历史快照，不声称未来重新构建逐字节一致；验收部署应分发同一已核验镜像，记录image ID与导出包SHA256。
+安装Docker Engine与Compose插件，将项目部署文件复制到目标目录，配置该主机自己的.env，然后在项目目录执行以下命令（示例项目路径需替换）：
+
+```bash
+cd /opt/excel-workbook-service
+mkdir -p data/docker
+sudo chown 10001:10001 data/docker
+# 已有.env不要覆盖；首次从.env.example复制并填写模型密钥
+test -f .env || cp .env.example .env
+chmod 600 .env
+docker compose up -d --build
+docker compose ps
+```
+
+容器以UID/GID 10001运行，Ubuntu目录没有写权限会导致SQLite无法创建；不要以chmod 777代替权限配置。默认只监听127.0.0.1，可信局域网访问在.env设置EXCEL_BIND_HOST=0.0.0.0并放行所需端口。仅核心服务不需要compose.test.yaml；如需测试前端，附加该文件启动。
+
+源码构建需要Dockerfile、app、config.yaml、run.py、requirements.txt和requirements.lock；无需复制.venv、node_modules、测试集。构建需要访问基础镜像、Debian及Python软件源。也可直接分发同架构的已验收镜像：目标执行docker load后使用docker compose up -d --no-build，部署包保留compose.yaml、配置及.env即可；需要测试前端时额外带examples/frontend、deploy/test-ui.conf。数据不包含在镜像中，迁移已有业务必须单独迁移整个data/docker。基础镜像固定摘要，依赖用requirements.lock锁定；重新构建不保证逐字节一致。
+
+## 旧命名卷迁移与回退
+
+只在维护窗口执行。先停核心及测试UI，确认没有任务执行，将旧命名卷只读挂载为/source，空的data/docker挂载为/target，独立data/backups挂载为/backup，通过本仓库scripts/migrate_volume_to_bind.py备份并复制。脚本拒绝非空目标，校验归档、所有文件SHA256及SQLite完整性；不覆盖历史目录，不删除旧卷。迁移失败不要启用半成品目录，应先用旧卷恢复服务。
+
+本机迁移后原卷excel-workbook-service_excel-data保留。回退命令（可选测试UI仍放在最后）：
+
+```bash
+docker compose -f compose.yaml -f deploy/compose.legacy-volume.yaml -f compose.test.yaml up -d --no-build
+```
+
+原卷是切换时的快照，切换后新产生的会话不会回写旧卷；有新数据时回退必须先停服备份并制定反向迁移，不能直接切回造成新记录不可见。
+
+2026-10-20本机已实际完成迁移：41个文件共808,803,197字节，全部文件哈希一致，13个SQLite检查正常；目录所有者对齐10001后服务健康。14个会话、666条消息、11份工作簿与导入记录、1项缓存元数据逐项一致，临时附件写入和清理通过。备份位于data/backups，原命名卷保留。此记录是本机迁移验证，不代表Ubuntu已实际部署或完整备份恢复演练已重新执行。
 
 Spring Boot 在同一宿主机可访问 127.0.0.1:8091；在另一个容器时应使用共享 Docker 网络下的服务名 excel-agent:8090。公网入口由正式网关管理，测试页面不是交付依赖。代理需放行实际上传大小，关闭流式缓冲，读取超时建议 600 秒；不自动重试问答 POST，避免重复执行和计费。
 

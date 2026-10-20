@@ -61,6 +61,29 @@ class StructuredLayoutTests(unittest.TestCase):
         self.assertEqual(['内容重复', '同名文件'], [s['region_title'] for s in draft['sheets']])
         self.build(draft)
 
+    def test_untitled_summary_keeps_metrics_and_blank_separated_tables(self):
+        draft = self.parse([[], [], ['扫描时间', '2026-06-24 17:05:49'],
+            ['扫描目录', 'D:\\business'], ['总文件数', '31,520'],
+            ['损坏/可疑文件数', '14,441'], ['损坏率', '45.82%'], [], [],
+            ['损坏类型', '数量', '严重程度'], ['ZIP损坏', 9, '严重'],
+            ['零字节', 5, '严重'], [], [], ['后缀', '数量'], ['.pdf', 26799], ['.xlsx', 133]])
+        self.assertEqual([], WorkbookImportService._validate_draft(draft)['errors'])
+        self.assertEqual([5, 2, 2], [s['row_count'] for s in draft['sheets']])
+        with closing(sqlite3.connect(self.build(draft))) as db:
+            t = draft['sheets'][0]['table_name']
+            values = db.execute(f'SELECT metric,value_raw,numeric_value,unit,_source_row FROM "{t}"').fetchall()
+            self.assertIn(('扫描时间', '2026-06-24 17:05:49', None, None, 3), values)
+            self.assertIn(('扫描目录', 'D:\\business', None, None, 4), values)
+            self.assertIn(('损坏率', '45.82%', .4582, '%', 7), values)
+            self.assertIn(('总文件数', '31,520', 31520.0, None, 5), values)
+
+    def test_untitled_summary_does_not_hide_unknown_or_incomplete_blocks(self):
+        for extra in [[['未解释的尾注']], [['后缀', '数量'], ['.pdf', 1, '未标注字段']]]:
+            with self.subTest(extra=extra):
+                draft = self.parse([['扫描总数', '100'], ['异常数', '5'], [],
+                                    ['类型', '数量'], ['甲', 5], []] + extra)
+                self.assertTrue(WorkbookImportService._validate_draft(draft)['errors'])
+
     def test_multilevel_headers_are_flattened_with_paths(self):
         def configure(sheet):
             for area in ['A1:A2', 'B1:C1', 'D1:E1']:

@@ -3,7 +3,7 @@ services:
   test-ui:
     image: nginx:stable-alpine
     ports:
-      - "127.0.0.1:${EXCEL_TEST_UI_PORT:-8092}:80"
+      - "${EXCEL_BIND_HOST:-127.0.0.1}:${EXCEL_TEST_UI_PORT:-8092}:80"
     volumes:
       - ./examples/frontend:/usr/share/nginx/html/ui:ro
       - ./deploy/test-ui.conf:/etc/nginx/conf.d/default.conf:ro

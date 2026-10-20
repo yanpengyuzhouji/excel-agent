@@ -1,0 +1,9 @@
+# Rollback only: the old volume is kept and is never auto-created here.
+services:
+  excel-agent:
+    volumes:
+      - excel-data:/data
+volumes:
+  excel-data:
+    external: true
+    name: excel-workbook-service_excel-data

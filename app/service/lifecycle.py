@@ -8,7 +8,7 @@ from pathlib import Path
 from sqlalchemy import inspect, text
 from ..core import ResourceBusyError
 from ..models.agent import AgentConversationEntity, AgentMessageEntity, DataSpaceWorkbookEntity, DatasetRelationEntity
-from ..models.workbook import WorkbookDatasetEntity, WorkbookImportEntity
+from ..models.workbook import WorkbookDatasetEntity, WorkbookImportEntity, AttachmentCacheEntity
 from ..models.catalog import WorkbookCatalogEntity
 from ..models.conversation import WorkbookConversationEntity
 
@@ -123,6 +123,7 @@ def cleanup(service, *, conv_id=None, owner_id=None, detach_import=None, workboo
                     if inspect(session.bind).has_table('workbook_catalog_fts'):
                         session.execute(text('DELETE FROM workbook_catalog_fts WHERE workbook_id=:id'), {'id': book_id})
                     session.query(WorkbookImportEntity).filter_by(workbook_id=book_id).delete(synchronize_session=False)
+                    session.query(AttachmentCacheEntity).filter_by(workbook_id=book_id).delete(synchronize_session=False)
                     session.query(WorkbookDatasetEntity).filter_by(workbook_id=book_id).delete(synchronize_session=False)
                     deleted.append(book_id)
             # The transaction has committed. Pending folders are no longer live data.

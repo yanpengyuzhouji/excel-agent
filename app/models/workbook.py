@@ -57,6 +57,18 @@ class WorkbookImportEntity(Model):
     gmt_modified = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class AttachmentCacheEntity(Model):
+    """Pointers to immutable, automatically accepted attachment artifacts."""
+
+    __tablename__ = 'attachment_cache'
+    cache_key = Column(String(64), primary_key=True)
+    owner_id = Column(String(128), nullable=False, index=True)
+    workbook_id = Column(String(64), nullable=False, unique=True)
+    import_id = Column(String(64), nullable=False)
+    draft_hash = Column(String(64), nullable=False)
+    database_hash = Column(String(64), nullable=False)
+
+
 class WorkbookDatasetDao(BaseDao):
     def list_by_owner(
         self, owner_id: str, limit: int = 200, offset: int = 0

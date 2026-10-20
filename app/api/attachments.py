@@ -2,12 +2,15 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from .endpoints import authenticate_request, get_service, create_import
+from .endpoints import authenticate_request, get_service
+from pathlib import Path
 from ..agent.session import AgentConversation
 from ..core import blocking_func_to_async, http_error
 from ..models.agent import AgentConversationDao
 from ..service.attachment_policy import review_issues
 from ..service.lifecycle import cleanup, cleanup_failed_imports
+from ..service.upload_stream import spool_upload
+from ..service.attachment_cache import cache_key, lookup, remember
 import logging
 
 router = APIRouter()
@@ -57,20 +60,25 @@ def rename_conversation(conv_id: str, request: ConversationUpdate, principal=Dep
     return {'conv_id': conv_id, **values}
 
 
-async def finalize_attachment(service, conv_id, principal, response, accept=False):
+def _prepare_attachment(service, response, accept=False):
     errors, severe = review_issues(response)
     if response.status != 'active' and not errors and (not severe or accept):
         codes = [w['code'] for w in response.validation.get('warnings', [])]
         try:
-            await blocking_func_to_async(service.confirm_import, response.import_id, response.revision, codes)
+            service.confirm_import(response.import_id, response.revision, codes)
             response = service.get_import(response.import_id)
         except Exception as exc:
             raise http_error(exc) from exc
+    return response
+
+
+def _finalize_attachment(service, conv_id, principal, response, filename=None, reused=False):
+    errors, severe = review_issues(response)
     item = {'import_id': response.import_id, 'workbook_id': response.workbook_id,
-            'filename': response.file_name, 'version': response.version,
+            'filename': filename or response.file_name, 'version': response.version,
             'status': 'ready' if response.status == 'active' else 'blocked' if errors else 'needs_review',
             'revision': response.revision, 'errors': errors, 'severe_warnings': severe,
-            'warnings': response.validation.get('warnings', [])}
+            'warnings': response.validation.get('warnings', []), 'reused': reused}
     # Reload after parsing to avoid replacing attachments uploaded before this one.
     conv = owned_conversation(conv_id, principal)
     scope = dict(conv.scope_json)
@@ -82,24 +90,59 @@ async def finalize_attachment(service, conv_id, principal, response, accept=Fals
     return item
 
 
+def _locked_finalize(service, conv_id, principal, response, accept=False):
+    response = _prepare_attachment(service, response, accept)
+    with service._lifecycle_lock:
+        return _finalize_attachment(service, conv_id, principal, response)
+
+
+async def finalize_attachment(service, conv_id, principal, response, accept=False):
+    return await blocking_func_to_async(_locked_finalize, service, conv_id, principal, response, accept)
+
+
+def _import_attachment(service, conv_id, principal, filename, staged_path, size, source_hash):
+    key = cache_key(service, principal, source_hash, filename)
+    with service._attachment_import_lock:
+        with service._lifecycle_lock:
+            conv = owned_conversation(conv_id, principal)
+            response = lookup(service, key, principal, source_hash)
+            already_attached = response and any(a['import_id'] == response.import_id
+                for a in conv.scope_json.get('attachments', []))
+            if not already_attached and len(conv.scope_json.get('attachments', [])) >= service.config.multi_workbook_max_selected:
+                raise HTTPException(422, 'Maximum conversation attachments reached')
+            if response:
+                logging.getLogger(__name__).info('attachment_cache_hit workbook_id=%s', response.workbook_id)
+                return _finalize_attachment(service, conv_id, principal, response, filename, reused=True)
+        response = service.create_import_from_path(filename, staged_path, 'agent', None, principal, size, source_hash)
+        response = _prepare_attachment(service, response)
+        with service._lifecycle_lock:
+            item = _finalize_attachment(service, conv_id, principal, response)
+            remember(service, key, principal, service.get_import(response.import_id))
+            return item
+
+
 @router.post('/agent/conversations/{conv_id}/attachments')
 async def upload_attachment(conv_id: str, file: UploadFile = File(...),
                             service=Depends(get_service), principal=Depends(authenticate_request)):
-    conv = owned_conversation(conv_id, principal)
-    if len(conv.scope_json.get('attachments', [])) >= service.config.multi_workbook_max_selected:
-        raise HTTPException(422, 'Maximum conversation attachments reached')
+    owned_conversation(conv_id, principal)
     try:
         service.begin_attachment_job(conv_id)
     except Exception as exc:
         raise http_error(exc) from exc
+    staged_path = None
     try:
         # Recheck after taking the job fence: deletion may have raced the first lookup.
         conv = owned_conversation(conv_id, principal)
-        if len(conv.scope_json.get('attachments', [])) >= service.config.multi_workbook_max_selected:
-            raise HTTPException(422, 'Maximum conversation attachments reached')
-        response = await create_import(file, 'agent', None, service, principal)
-        return await finalize_attachment(service, conv_id, principal, response)
+        staged_path, size, source_hash = await spool_upload(file,
+            str(Path(service.config.resolved_storage_path()) / '.incoming'), service.config.max_import_bytes)
+        return await blocking_func_to_async(_import_attachment, service, conv_id, principal,
+            file.filename or 'workbook.xlsx', staged_path, size, source_hash)
+    except Exception as exc:
+        raise http_error(exc) from exc
     finally:
+        await file.close()
+        if staged_path:
+            Path(staged_path).unlink(missing_ok=True)
         service.end_attachment_job(conv_id)
         try:
             await blocking_func_to_async(cleanup_failed_imports, service, principal)

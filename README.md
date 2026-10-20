@@ -2,7 +2,11 @@
 
 独立的 Excel 问数核心 API：上传工作簿，解析表头与逻辑区域、校验完整性、生成 SQLite 查询库，再由 Agent 查询、计算和回答。支持多工作簿比较、连续会话、HTML 报告和 PDF 下载，可由 Spring Boot 或其他后端接入。
 
-当前版本 **1.2.0-rc.39**。核心 Docker 镜像仅包含 API，聊天页面作为独立测试前端运行。附件不进入向量知识库，但原文件、查询库、会话和报告会持久保存。
+当前版本 **1.2.0-rc.43**。核心 Docker 镜像仅包含 API，聊天页面作为独立测试前端运行。附件不进入向量知识库，但原文件、查询库、会话和报告会持久保存。RC40更新报告样式，RC41增加硅基流动Qwen3-14B配置，RC42支持无标题汇总表，RC43增加附件内容去重复用。RC39完整模型验收记录仍按原版本保留。
+
+聊天附件重复上传时，SHA256、文件格式、解析/建库实现、读取器版本及解析限制一致，并且现有结果完整且无需严重告警确认，才复用原文件、草稿和查询库。上传响应 `reused=true` 表示命中。每次仍需完成上传并计算hash，不能节省网络传输；会话附件名可不同，工作簿目录名称沿用首次上传。删除最后引用时清理共享数据及缓存索引。缓存工作簿不可原地更新版本；内容或解析配置变化生成新的工作簿。
+
+去重仅作用于新的聊天附件上传；历史附件不自动合并，直接 `/workbook-imports` 的人工草稿/版本接口保持独立语义。当前单进程容器对附件建库串行发布以避免并发重复，不能直接用于多个进程或多个实例共享一个数据卷。详见[RC43说明](docs/release-1.2.0-rc.43.md)。
 
 ## 快速部署
 
@@ -22,6 +26,14 @@ docker compose -f compose.yaml -f compose.test.yaml up -d
 | OpenAPI 交互文档 | `http://127.0.0.1:8091/docs` |
 | 测试页面 | `http://127.0.0.1:8092/ui/` |
 | 健康检查 | `http://127.0.0.1:8091/api/v1/health` |
+
+默认仅本机访问。需要局域网使用时，在`.env`中设置`EXCEL_BIND_HOST=部署主机的局域网IP`（例如`192.168.0.20`），重新执行Compose启动命令；其他电脑以该IP访问8092页面或8091 API。主机防火墙需允许相应端口。
+
+明确需要监听所有网卡时可设置`EXCEL_BIND_HOST=0.0.0.0`，重新启动后仍使用主机实际局域网IP访问8091/8092。当前共享模式无登录鉴权，应按部署范围配置主机防火墙。
+
+Windows Docker Desktop使用WSL镜像网络时，需同时检查Windows与Hyper-V防火墙。可在管理员PowerShell执行`./scripts/enable_docker_lan.ps1`，仅放行本服务的TCP 8091/8092；Hyper-V规则限制私有网络来源，不依赖某个主机IP。当前不使用额外Windows转发进程或18091/18092端口。本机用`127.0.0.1`，局域网其他设备用部署主机当前IP；本机通过自身局域网IP访问WSL的回环测试可能与外部设备不同，应分别验证。
+
+若`127.0.0.1`正常而本机实际IP超时，检查`%UserProfile%/.wslconfig`：`networkingMode=mirrored`属于`[wsl2]`，`hostAddressLoopback=true`必须放在`[experimental]`下。修正后需停止Docker Desktop、执行`wsl --shutdown`并重新启动Docker Desktop与项目容器。2026-10-19已在本机验证此修正后8091/8092的实际IP直连恢复，页面和健康接口均返回200。
 
 部署已验收镜像归档时先 `docker load`，再用 `docker compose up -d --no-build` 保留原镜像。Windows/Ubuntu、配置和持久化说明见[部署文档](docs/docker-deployment.md)。
 
@@ -66,6 +78,8 @@ docker compose -f compose.yaml -f compose.test.yaml up -d
 
 选择顺序为请求指定模型、会话选择、服务默认。候选模型保留兼容配置，各供应商参数和配额不同；`GET /models` 返回配置，不代表实时可用性。DeepSeek 控制阶段使用 JSON 动作协议并关闭思考；思考模型可单独配置首正文时限。
 
+Qwen3-14B 提供 `Qwen3-14B-SiliconFlow`（非思考）和 `Qwen3-14B-thinking-SiliconFlow`（思考）两个选择器，实际模型均为 `Qwen/Qwen3-14B`，接口 `https://api.siliconflow.cn/v1`，密钥变量 `SILICONFLOW_API_KEY`。服务保守配置上下文32768 tokens，最大输出8192；首正文等待分别10秒和30秒，单次调用总时限均90秒。默认模型不变，不向用户展示原始思维链。2026-10-19魔搭返回 `has no provider supported` 后切换至硅基流动，两种模式均通过最小JSON动作请求测试；尚未开展14B问数能力完整回归。密钥仅在部署环境提供，不包含于镜像或仓库。
+
 容器通过外部 API 调用模型，不加载模型权重，无 GPU 要求。必要的目录、数据样本、查询结果和历史内容会发送到所选供应商。非秘密配置 `config.yaml` 随镜像提供，运行密钥通过 `.env` 注入；可用 `EXCEL_CONFIG_PATH`、`EXCEL_STORAGE_PATH`、`EXCEL_LLM_BASE_URL`、`EXCEL_LLM_MODEL`、`EXCEL_LLM_API_KEY` 等覆盖。容器内 `localhost` 指容器自身。
 
 上下文由项目自研管理，默认应用窗口32k、输出预留8192，按字符数量估算 Token，接近阈值时提取式压缩。原消息和证据保留，被省略的数据可按结果 ID 读取；压缩会省略信息，不清零累计预算。证据发布回答通常先解析完整候选答案再分块发送，逐字显示不等于逐个模型 Token 立即透传。
@@ -81,7 +95,7 @@ docker compose -f compose.yaml -f compose.test.yaml up -d
 - 首问生成默认标题，历史支持右键重命名、置顶和删除。删除会话/附件时清理独占数据，仍被其他资源引用的工作簿保留。
 - 没有自动 TTL，仍存在的会话和附件会持续保存。
 
-命名卷 `excel-data` 挂载 `/data`，保存元数据库、附件、草稿、查询库和报告。替换容器不等于删除数据。`.env`、业务文件、私有测试结果和镜像归档不提交 Git、不进入核心镜像。
+项目目录 `./data/docker` 绑定挂载到容器 `/data`，保存元数据库、附件、草稿、查询库和报告。在Windows文件管理器或服务器上均可直接查看，替换容器不等于删除数据；不要在运行中修改数据库或源附件。Ubuntu首次启动前执行 `mkdir -p data/docker` 和 `sudo chown 10001:10001 data/docker`。该目录及 `data/backups` 被Git和Docker构建忽略，业务数据不进入镜像。旧命名卷不会自动迁移，已有部署须按[部署文档](docs/docker-deployment.md)停服备份并迁移。
 
 ## 资源与运维
 

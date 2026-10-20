@@ -21,6 +21,15 @@ def docker(*args):
     return value.stdout.strip()
 
 
+def data_mount(source, target):
+    if isinstance(source, str):
+        return f'type=volume,source={source},target={target},readonly'
+    if source['Type'] not in {'bind','volume'}:
+        raise ValueError('Unsupported live data mount')
+    location=source['Name'] if source['Type']=='volume' else source['Source']
+    return f"type={source['Type']},source={location},target={target},readonly"
+
+
 def ready(origin):
     start = time.monotonic()
     while time.monotonic()-start < 60:
@@ -55,7 +64,7 @@ def main():
             raise RuntimeError('Recovery verification failed: '+name)
     def snapshot(vol):
         result = docker('run', '--rm', '--user', '0', '--network', 'none',
-            '--mount', f'type=volume,source={vol},target=/data,readonly',
+            '--mount', data_mount(vol, '/data'),
             '--mount', f'type=bind,source={ROOT / "scripts"},target=/verification,readonly',
             image, 'python', '/verification/volume_manifest.py', '/data')
         return json.loads(result)
@@ -66,9 +75,9 @@ def main():
     try:
         image = docker('inspect', '--format', '{{.Image}}', LIVE)
         mounts = json.loads(docker('inspect', '--format', '{{json .Mounts}}', LIVE))
-        source = next(m for m in mounts if m['Destination'] == '/data' and m['Type'] == 'volume')['Name']
-        assert source != volume and clone.startswith('excel-restore-') and volume.startswith('excel-restore-')
-        report.update(image=image, source_volume=source)
+        source = next(m for m in mounts if m['Destination'] == '/data' and m['Type'] in {'volume','bind'})
+        assert source.get('Name') != volume and clone.startswith('excel-restore-') and volume.startswith('excel-restore-')
+        report.update(image=image, source_mount=source)
         with httpx.Client(base_url=BASE, timeout=90, trust_env=False) as client:
             conv_response = client.post('/api/v1/agent/conversations', json={'title': 'backup drill temporary canary'})
             conv_response.raise_for_status()
@@ -106,7 +115,7 @@ def main():
             check('source_sqlite_integrity', bool(original['databases']) and all(d['integrity_ok'] for d in original['databases'].values()),
                   databases=len(original['databases']), files=original['file_count'], bytes=original['total_bytes'])
             docker('run', '--rm', '--user', '0', '--network', 'none',
-                '--mount', f'type=volume,source={source},target=/source,readonly',
+                '--mount', data_mount(source, '/source'),
                 '--mount', f'type=bind,source={out},target=/backup', image,
                 'tar', 'cf', '/backup/data-volume.tar', '-C', '/source', '.')
         finally:
@@ -128,6 +137,9 @@ def main():
             '--mount', f'type=volume,source={volume},target=/target',
             '--mount', f'type=bind,source={out},target=/backup,readonly', image,
             'tar', 'xf', '/backup/data-volume.tar', '-C', '/target')
+        docker('run','--rm','--user','0','--network','none',
+            '--mount',f'type=volume,source={volume},target=/target',image,
+            'chown','-R','10001:10001','/target')
         restored = snapshot(volume)
         (out/'restored-manifest.json').write_text(json.dumps(restored, ensure_ascii=False, indent=2), encoding='utf-8')
         check('all_file_hashes_match', original['files'] == restored['files'])

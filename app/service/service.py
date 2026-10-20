@@ -40,6 +40,7 @@ from ..models.workbook import (
     WorkbookDatasetEntity,
     WorkbookImportDao,
     WorkbookImportEntity,
+    AttachmentCacheEntity,
 )
 from ..models.conversation import (
     WorkbookConversationEntity,
@@ -109,6 +110,8 @@ class WorkbookImportService:
         self._active_agent_runs = 0
         self._agent_run_scopes = {}
         self._attachment_jobs = set()
+        # ponytail: one attachment publisher per process; distributed workers need a DB lease.
+        self._attachment_import_lock = threading.Lock()
 
     @property
     def config(self) -> Any:
@@ -416,6 +419,9 @@ class WorkbookImportService:
             )
             if not dataset:
                 raise ValueError(f"Workbook not found: {workbook_id}")
+            with self._import_dao.session() as session:
+                if session.query(AttachmentCacheEntity).filter_by(workbook_id=workbook_id).first():
+                    raise ValueError('Cached attachment is immutable; upload as a new workbook instead')
         else:
             workbook_id = uuid.uuid4().hex
             datasource_name = f"workbook_{workbook_id[:16]}"

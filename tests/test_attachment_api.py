@@ -12,6 +12,91 @@ from app.main import app
 
 
 class AttachmentApiTests(unittest.TestCase):
+    def cached_csv(self, conv=None, content=b'item,amount\nA,10\nB,20\n', name='sample.csv'):
+        response = self.client.post(f'/api/v1/agent/conversations/{conv or self.conv}/attachments',
+                                   files={'file': (name, content)})
+        self.assertEqual(200, response.status_code, response.text)
+        return response.json()
+
+    def other_conversation(self):
+        return self.client.post('/api/v1/agent/conversations', json={'title':'reuse test'}).json()['conv_id']
+
+    def test_identical_upload_reuses_and_last_reference_cleans(self):
+        from pathlib import Path
+        first = self.cached_csv()
+        other = self.other_conversation()
+        with patch('app.service.service.parse_workbook', side_effect=AssertionError('must not reparse')):
+            second = self.cached_csv(other, name='renamed.csv')
+        self.assertFalse(first['reused'])
+        self.assertTrue(second['reused'])
+        self.assertEqual(first['workbook_id'], second['workbook_id'])
+        self.assertEqual('renamed.csv', self.client.get(f'/api/v1/agent/conversations/{other}').json()['scope']['attachments'][0]['filename'])
+        path = Path(self.temp.name)/first['workbook_id']
+        self.client.delete(f'/api/v1/agent/conversations/{self.conv}')
+        self.assertTrue(path.exists())
+        self.client.delete(f'/api/v1/agent/conversations/{other}')
+        self.assertFalse(path.exists())
+        from app.models.workbook import AttachmentCacheEntity
+        with app.state.excel_service._import_dao.session() as session:
+            self.assertEqual(0,session.query(AttachmentCacheEntity).count())
+
+    def test_same_conversation_reupload_is_idempotent(self):
+        first = self.cached_csv()
+        app.state.excel_service.config.multi_workbook_max_selected = 1
+        second = self.cached_csv()
+        self.assertEqual(first['workbook_id'],second['workbook_id'])
+        scope = self.client.get(f'/api/v1/agent/conversations/{self.conv}').json()['scope']
+        self.assertEqual(1,len(scope['attachments']))
+
+    def test_manual_warning_acceptance_never_bypasses_another_upload(self):
+        content = '项目,金额\n甲,10\n乙,20\n合计,30\n'.encode('utf-8')
+        first = self.cached_csv(content=content)
+        self.assertEqual('needs_review',first['status'])
+        response=self.client.post(f"/api/v1/agent/conversations/{self.conv}/attachments/{first['import_id']}/confirm",
+            json={'revision':first['revision'],'accept_severe_warnings':True})
+        self.assertEqual(200,response.status_code,response.text)
+        second=self.cached_csv(self.other_conversation(),content)
+        self.assertEqual('needs_review',second['status'])
+        self.assertFalse(second['reused'])
+        self.assertNotEqual(first['workbook_id'],second['workbook_id'])
+
+    def test_changed_content_or_parser_config_is_not_reused(self):
+        first = self.cached_csv()
+        changed = self.cached_csv(self.other_conversation(), b'item,amount\nA,11\nB,20\n')
+        self.assertNotEqual(first['workbook_id'],changed['workbook_id'])
+        app.state.excel_service.config.max_import_rows -= 1
+        configured = self.cached_csv(self.other_conversation())
+        self.assertFalse(configured['reused'])
+        self.assertNotEqual(first['workbook_id'],configured['workbook_id'])
+
+    def test_concurrent_equal_uploads_publish_one_workbook(self):
+        from concurrent.futures import ThreadPoolExecutor
+        conversations = [self.other_conversation(),self.other_conversation()]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(self.cached_csv,conversations))
+        self.assertEqual(1,len({r['workbook_id'] for r in results}))
+        self.assertEqual([False,True],sorted(r['reused'] for r in results))
+
+    def test_corrupt_cached_file_is_not_reused_and_old_book_stays_immutable(self):
+        from pathlib import Path
+        first = self.cached_csv()
+        service = app.state.excel_service
+        entity = service._load_entity(first['import_id'])
+        Path(entity.database_path).write_bytes(b'broken cache')
+        second = self.cached_csv(self.other_conversation())
+        self.assertFalse(second['reused'])
+        self.assertNotEqual(first['workbook_id'],second['workbook_id'])
+        with self.assertRaisesRegex(ValueError,'immutable'):
+            service.create_import('sample.csv',b'item,amount\nA,12\n','agent',first['workbook_id'],'anonymous')
+
+    def test_cache_identity_includes_owner_and_parser_dependencies(self):
+        from app.service.attachment_cache import cache_key
+        service=app.state.excel_service
+        first=cache_key(service,'owner-a','hash','file.csv')
+        self.assertNotEqual(first,cache_key(service,'owner-b','hash','file.csv'))
+        with patch('app.service.attachment_cache.version',return_value='changed-reader'):
+            self.assertNotEqual(first,cache_key(service,'owner-a','hash','file.csv'))
+
     def test_retained_note_and_repeated_header_are_automatically_ready(self):
         item = self.upload_rows([['项目','金额'],['甲',10],['乙',20],
                                  ['项目','金额'],['备注：合计3类设备；1*35；2025/03/01']])

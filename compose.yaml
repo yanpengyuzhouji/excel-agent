@@ -1,11 +1,11 @@
 services:
   excel-agent:
-    image: excel-workbook-service:1.2.0-rc.39
+    image: excel-workbook-service:1.2.0-rc.43
     build: .
     env_file:
       - .env
     ports:
-      - "127.0.0.1:${EXCEL_PUBLISHED_PORT:-8091}:8090"
+      - "${EXCEL_BIND_HOST:-127.0.0.1}:${EXCEL_PUBLISHED_PORT:-8091}:8090"
     environment:
       EXCEL_REQUIRE_AUTH: "false"
       EXCEL_LLM_BASE_URL: ${EXCEL_LLM_BASE_URL:-https://api.deepseek.com/v1}
@@ -14,7 +14,9 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       MODELSCOPE_API_KEY: ${MODELSCOPE_API_KEY:-}
     volumes:
-      - excel-data:/data
+      - type: bind
+        source: ./data/docker
+        target: /data
     restart: unless-stopped
     init: true
     mem_limit: 8g
@@ -26,5 +28,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-volumes:
-  excel-data:

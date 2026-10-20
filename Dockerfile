@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir -r requirements.lock && useradd --uid 10001 --cre
 COPY app ./app
 COPY config.yaml run.py ./
 USER excel
-LABEL org.opencontainers.image.version="1.2.0-rc.33"
+LABEL org.opencontainers.image.version="1.2.0-rc.43"
 EXPOSE 8090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/v1/health', timeout=3)"
 CMD ["python", "run.py"]

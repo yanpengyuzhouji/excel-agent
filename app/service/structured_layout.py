@@ -208,8 +208,47 @@ def parse_structured_sheet(parsed, sheet_id, table_base):
         if set().union(*(set(r['cells']) for r in result))!=set(facts): return None
         return result
 
+    def untitled_summary_regions():
+        # A metric preamble plus explicit column headers anchors this layout;
+        # blank rows alone must never turn arbitrary records into new schemas.
+        fields = set(HEADER_FIELD_WORDS) | {'类型','后缀','数量','严重程度','损坏类型','金额'}
+        def header(values):
+            return (len(values) >= 2 and all(isinstance(v, str) and v.strip() for v in values)
+                    and sum(normalize_label(v) in fields for v in values) >= 2)
+        active = sorted({_parse_cell_reference(c)[0] for c in facts})
+        blocks = []
+        for r in active:
+            if not blocks or r > blocks[-1][-1] + 1:
+                blocks.append([])
+            blocks[-1].append(r)
+        if len(blocks) < 2:
+            return None
+        prefix = blocks[0]
+        pairs = [rows[r-1] for r in prefix]
+        if (len(pairs) < 2 or any(len(v) < 2 or not isinstance(v[0], str) or not v[0].strip()
+                or _is_empty(v[1]) or any(not _is_empty(x) for x in v[2:]) for v in pairs)
+                or header(pairs[0][:2]) or len({v[0].strip() for v in pairs}) != len(pairs)
+                or sum(metric_number(v[1])[0] is not None for v in pairs) < 2):
+            return None
+        result = [make_region(prefix[0],prefix[-1],'指标概览',[],True)]
+        for block in blocks[1:]:
+            first = list(rows[block[0]-1])
+            while first and _is_empty(first[-1]):
+                first.pop()
+            if not header(first) or len(block) < 2:
+                return None
+            if any(any(not _is_empty(v) for v in rows[r-1][len(first):]) for r in block):
+                return None
+            result.append(make_region(block[0],block[-1],' / '.join(first),[block[0]]))
+        if any(r is None for r in result):
+            return None
+        if set().union(*(set(r['cells']) for r in result)) != set(facts):
+            return None
+        return result
+
     regions = []
     side_regions=horizontal_regions() if not headings else None
+    summary_regions=untitled_summary_regions() if not headings and not side_regions else None
     if headings:
         starts = sorted(headings)
         if any(f.get('raw_value') not in (None,'') and _parse_cell_reference(c)[0] < starts[0] for c,f in facts.items()):
@@ -233,6 +272,8 @@ def parse_structured_sheet(parsed, sheet_id, table_base):
             regions.append(region)
     elif side_regions:
         regions.extend(side_regions)
+    elif summary_regions:
+        regions.extend(summary_regions)
     elif merged:
         active = sorted({_parse_cell_reference(c)[0] for c,f in facts.items() if f.get('raw_value') not in (None,'')})
         if not active:

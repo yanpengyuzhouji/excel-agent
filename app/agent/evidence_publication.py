@@ -415,33 +415,5 @@ def review_publication(llm, question, publication, evidence, budget):
 
 
 def render_html(text, title):
-    """Small escaped Markdown renderer for our answer format; no raw HTML execution."""
-    out, table, paragraph = [], [], []
-    def escaped(value):
-        return html.escape(re.sub(r'\\([\\`*_\[\]<>&|])', r'\1', value))
-    def flush():
-        if paragraph:
-            out.append('<p>'+'<br>'.join(escaped(s) for s in paragraph)+'</p>')
-            paragraph.clear()
-    def flush_table():
-        if table:
-            rows = [re.split(r'(?<!\\)\|', line.strip().strip('|')) for line in table]
-            out.append('<table><thead><tr>'+''.join('<th>'+escaped(c.strip())+'</th>' for c in rows[0])+'</tr></thead><tbody>')
-            for row in rows[2:]:
-                out.append('<tr>'+''.join('<td>'+escaped(c.strip())+'</td>' for c in row)+'</tr>')
-            out.append('</tbody></table>')
-            table.clear()
-    for line in text.splitlines()+['']:
-        if line.lstrip().startswith('|'):
-            flush(); table.append(line)
-            continue
-        flush_table()
-        if not line.strip():
-            flush()
-        elif line.startswith('#'):
-            flush(); out.append('<h2>'+escaped(line.lstrip('#').strip())+'</h2>')
-        else:
-            paragraph.append(line)
-    return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>'+html.escape(title)+
-        '</title><style>body{font-family:sans-serif;line-height:1.65;color:#243447;margin:24px}h2{break-after:avoid}p{overflow-wrap:anywhere}table{border-collapse:collapse;width:100%;font-size:12px}td,th{border:1px solid #ddd;padding:6px}thead{display:table-header-group}tr{break-inside:avoid}</style></head><body><h1>'+
-        html.escape(title)+'</h1>'+''.join(out)+'</body></html>')
+    from .report_rendering import render_html as render_report
+    return render_report(text, title)
